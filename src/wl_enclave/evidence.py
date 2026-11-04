@@ -18,6 +18,11 @@ three kinds of record, because no one layer can answer for the others:
     use a tool; only something in the network path knows where it then tried
     to go.
 
+``egress.records_suppressed``
+    The guard's own statement that it dropped records it could not write. A
+    bundle carrying one of these is incomplete by its own account, which
+    :func:`verify` reports separately from whether the chain is intact.
+
 ``egress.attested``
     Whether the runtime confirms the guard was the sandbox's *only* route, read
     back from the runtime rather than assumed. This is what makes the
@@ -238,12 +243,32 @@ class VerifyResult:
     #: covering only ``http_connect`` still holds no record of a raw socket, so
     #: the two facts have to be read together.
     egress_covers: Optional[list] = None
+    #: ``True`` when nothing in the chain says records were dropped. Separate
+    #: from :attr:`ok` on purpose: an intact chain and a complete one are
+    #: different claims, and collapsing them would make a run that hit a rate
+    #: limit indistinguishable from one whose chain was tampered with.
+    complete: bool = True
+    #: How many records the guard reports dropping, when it says so.
+    records_dropped: int = 0
+
+    @property
+    def verdict(self) -> str:
+        """``ok``, ``incomplete`` or ``failed`` — what a gate should branch on."""
+        if not self.ok:
+            return "failed"
+        return "ok" if self.complete else "incomplete"
 
     @property
     def summary(self) -> str:
         if not self.ok:
             return f"FAILED — {len(self.problems)} problem(s)"
         note = "signed" if self.signed else "unsigned"
+        if not self.complete:
+            dropped = f"{self.records_dropped} dropped" if self.records_dropped else "some dropped"
+            return (
+                f"INCOMPLETE — {self.records} records, chain intact, {note}, "
+                f"but the guard reports records it could not write ({dropped})"
+            )
         return f"OK — {self.records} records, chain intact, {note}"
 
 
@@ -335,6 +360,18 @@ def verify(bundle_dir: Path) -> VerifyResult:
             f"(reporting the first, at seq {attestations[0].seq})"
         )
 
+    # A guard that could not write a record says so in the record file, and
+    # that note is chained like any other. It is the one record whose whole
+    # purpose is to deny the file's completeness, so it must reach the verdict:
+    # left unread, a rate-limited run verifies as "OK — chain intact" and a
+    # reviewer has no way to learn the file is an understatement.
+    suppressions = [r for r in records if r.type == "egress.records_suppressed"]
+    records_dropped = 0
+    for note in suppressions:
+        value = note.data.get("records_dropped")
+        if isinstance(value, int) and value > records_dropped:
+            records_dropped = value
+
     return VerifyResult(
         ok=not problems,
         records=len(records),
@@ -343,4 +380,6 @@ def verify(bundle_dir: Path) -> VerifyResult:
         signed=False,
         egress_attested=egress_attested,
         egress_covers=egress_covers,
+        complete=not suppressions,
+        records_dropped=records_dropped,
     )

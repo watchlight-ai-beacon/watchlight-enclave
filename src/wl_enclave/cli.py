@@ -359,10 +359,30 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Counted over recognised records only, so the summary cannot disagree
         # with the chain: a record the chain shows as unrecognised must not be
         # tallied as an ordinary attempt in run.close.
-        counted = [e for e in egress if e.get("event") in GUARD_RECORD_TYPES]
-        egress_allowed = sum(1 for e in counted if e.get("verdict") == "allow")
-        egress_denied = sum(1 for e in counted if e.get("verdict") == "deny")
-        egress_unrecognised = len(egress) - len(counted)
+        # Counted per record type. Summing over "every recognised record" made
+        # egress_attempts the size of the file rather than a count of attempts:
+        # a tunnel is a second record about an attempt already counted, a
+        # saturation note names no destination at all, and a suppression note
+        # is not an event. Each gets its own field so no single number has to
+        # mean several things.
+        def _of(kind: str) -> list:
+            return [e for e in egress if e.get("event") == kind]
+
+        attempts = _of("egress.attempt")
+        egress_allowed = sum(1 for e in attempts if e.get("verdict") == "allow")
+        egress_denied = sum(1 for e in attempts if e.get("verdict") == "deny")
+        egress_unrecognised = sum(
+            1 for e in egress if e.get("event") not in GUARD_RECORD_TYPES
+        )
+        suppressions = _of("egress.records_suppressed")
+        records_dropped = max(
+            (
+                n.get("records_dropped", 0)
+                for n in suppressions
+                if isinstance(n.get("records_dropped"), int)
+            ),
+            default=0,
+        )
 
         allows = sum(1 for d in decisions if d.get("decision") == "Allow")
         denies = sum(1 for d in decisions if d.get("decision") == "Deny")
@@ -375,7 +395,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "timed_out": timed_out,
                 "decisions": len(decisions),
                 "allow": allows, "deny": denies, "needs_approval": holds,
-                "egress_attempts": len(counted),
+                "egress_attempts": len(attempts),
+                "egress_tunnels": len(_of("egress.tunnel")),
+                "egress_saturated_notes": len(_of("egress.saturated")),
+                "egress_records_suppressed": len(suppressions),
+                "egress_records_dropped": records_dropped,
                 "egress_unrecognised": egress_unrecognised,
                 "egress_allowed": egress_allowed,
                 "egress_denied": egress_denied,
@@ -395,6 +419,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         _say(f"decisions: {allows} allow, {denies} deny" + (f", {holds} held" if holds else ""))
         if guard is not None:
             _say(f"egress:    {egress_allowed} allow, {egress_denied} deny")
+        if suppressions:
+            _say(
+                f"egress:    INCOMPLETE — the guard dropped {records_dropped} "
+                f"record(s) it could not write"
+            )
         _say(f"exit {status if status is not None else 'killed (timeout)'}")
         _say(f"bundle   {run.bundle_dir}")
         _say(f"verify   wl-enclave verify {run.bundle_dir}")
@@ -517,6 +546,15 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         _say(f"         records cover {covers} only; other traffic was blocked, not recorded")
     elif result.egress_attested is False:
         _say("egress   NOT attested: the sandbox may have had another route")
+    if not result.complete:
+        _say(
+            f"egress   INCOMPLETE: the guard reports {result.records_dropped} "
+            f"record(s) it could not write"
+        )
+        _say(
+            "         the egress records in this bundle are a lower bound, by "
+            "the guard's own account"
+        )
     for problem in result.problems:
         print(f"            - {problem}")
     _say(result.summary)
@@ -530,7 +568,10 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             "note: the chain is internally consistent but unsigned, so it "
             "proves nothing about who produced it"
         )
-    return 0 if result.ok else 1
+    # Non-zero for an incomplete bundle as well as a broken one. A gate that
+    # passed a bundle the guard itself calls incomplete would make the
+    # suppression note decorative.
+    return 0 if result.verdict == "ok" else 1
 
 
 def _cmd_evidence_export(args: argparse.Namespace) -> int:

@@ -106,3 +106,45 @@ def test_a_bundle_with_no_guard_claims_nothing_about_egress(tmp_path):
     a different and more alarming statement than "no guard was configured".
     """
     assert evidence.verify(build(tmp_path, RUN)).egress_attested is None
+
+
+# -- a bundle the guard calls incomplete must not verify as OK ------------
+
+def test_a_suppression_note_makes_the_bundle_incomplete_not_failed(tmp_path):
+    """Three states, not two.
+
+    An intact chain and a complete one are different claims. A run that hit a
+    rate limit must not read "OK", and must not read "FAILED" either — that
+    would be indistinguishable from a tampered chain and would train a reviewer
+    to ignore it.
+    """
+    bundle = tmp_path / "bundle"
+    chain = evidence.ChainWriter(bundle)
+    chain.append("run.open", {"purpose": "t"})
+    chain.append("egress.attempt", {"host": "example.com", "port": 443, "verdict": "allow"})
+    chain.append(
+        "egress.records_suppressed",
+        {"reason": "per-run record limit reached", "records_dropped": 4096},
+    )
+    chain.append("run.close", {"exit_code": 0})
+    chain.seal({"agent": "t"})
+
+    result = evidence.verify(bundle)
+    assert result.ok is True, "the chain itself is intact"
+    assert result.complete is False
+    assert result.records_dropped == 4096
+    assert result.verdict == "incomplete"
+    assert "INCOMPLETE" in result.summary
+    assert "4096" in result.summary
+
+
+def test_a_clean_bundle_is_complete(tmp_path):
+    bundle = tmp_path / "bundle"
+    chain = evidence.ChainWriter(bundle)
+    chain.append("run.open", {"purpose": "t"})
+    chain.append("run.close", {"exit_code": 0})
+    chain.seal({"agent": "t"})
+
+    result = evidence.verify(bundle)
+    assert (result.ok, result.complete, result.verdict) == (True, True, "ok")
+    assert result.summary.startswith("OK")

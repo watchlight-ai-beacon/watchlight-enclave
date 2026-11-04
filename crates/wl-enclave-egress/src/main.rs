@@ -136,6 +136,9 @@ async fn main() -> std::process::ExitCode {
                     "wl-enclave-egress: shutting down after {} connection(s)",
                     guard.connections.load(Ordering::Relaxed)
                 );
+                // Last thing written, so the file states the size of its own
+                // gap even when the run ended under a rate limit.
+                guard.recorder.finish();
                 return std::process::ExitCode::SUCCESS;
             }
             accepted = listener.accept() => {
@@ -159,7 +162,7 @@ async fn main() -> std::process::ExitCode {
                         let guard = guard.clone();
                         let in_flight = MAX_CONNECTIONS - permits.available_permits();
                         tokio::spawn(async move {
-                            guard.recorder.saturated(&peer.to_string(), in_flight);
+                            guard.recorder.saturated(in_flight);
                             refuse_saturated(stream).await;
                         });
                         continue;
@@ -235,7 +238,7 @@ async fn serve(
         // mean parsing and rewriting attacker-controlled requests for no
         // evidentiary gain, since an agent that wants to be governed can use
         // TLS. Refusing is the smaller attack surface.
-        guard
+        let _ = guard
             .recorder
             .attempt(target, 0, false, "non-CONNECT request refused", "http");
         return respond(&mut client, 405, "Method Not Allowed").await;
@@ -244,13 +247,13 @@ async fn serve(
     // Authority-form requires an explicit port. Guessing one would mean the
     // record said a port the client never asked for.
     let Some((host, port)) = target.rsplit_once(':') else {
-        guard
+        let _ = guard
             .recorder
             .attempt(target, 0, false, "CONNECT target is not host:port", "connect");
         return respond(&mut client, 400, "Bad Request").await;
     };
     let Ok(port) = port.parse::<u16>() else {
-        guard
+        let _ = guard
             .recorder
             .attempt(host, 0, false, "CONNECT port is not a number", "connect");
         return respond(&mut client, 400, "Bad Request").await;
@@ -260,7 +263,7 @@ async fn serve(
     // 1. The allowlist: is this destination named at all?
     let verdict = guard.allowlist.permits(host, port);
     if !verdict.allowed {
-        guard
+        let _ = guard
             .recorder
             .attempt(host, port, false, &verdict.reason, "connect");
         // The client is told only that it was refused. The reason is evidence,
@@ -278,13 +281,13 @@ async fn serve(
     {
         Ok(Ok(addrs)) => addrs.collect::<Vec<_>>(),
         Ok(Err(err)) => {
-            guard
+            let _ = guard
                 .recorder
                 .attempt(host, port, false, &format!("DNS lookup failed: {err}"), "connect");
             return respond(&mut client, 502, "Bad Gateway").await;
         }
         Err(_) => {
-            guard
+            let _ = guard
                 .recorder
                 .attempt(host, port, false, "DNS lookup timed out", "connect");
             return respond(&mut client, 504, "Gateway Timeout").await;
@@ -307,7 +310,7 @@ async fn serve(
         let reason = refusal
             .map(|r| format!("allowlisted host resolved to a refused address: {}", r.reason()))
             .unwrap_or_else(|| "host did not resolve".to_string());
-        guard.recorder.attempt(host, port, false, &reason, "connect");
+        let _ = guard.recorder.attempt(host, port, false, &reason, "connect");
         return respond(&mut client, 403, "Forbidden").await;
     };
 
@@ -315,22 +318,30 @@ async fn serve(
     let upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
         Ok(Ok(s)) => s,
         Ok(Err(err)) => {
-            guard
+            let _ = guard
                 .recorder
                 .attempt(host, port, false, &format!("upstream unreachable: {err}"), "connect");
             return respond(&mut client, 502, "Bad Gateway").await;
         }
         Err(_) => {
-            guard
+            let _ = guard
                 .recorder
                 .attempt(host, port, false, "upstream connect timed out", "connect");
             return respond(&mut client, 504, "Gateway Timeout").await;
         }
     };
 
-    guard
+    // Fail closed: if the attempt could not be recorded, it does not happen.
+    // Forwarding here is what turned a record-budget limit into a laundering
+    // channel — a flood of destination-less refusals could exhaust the file,
+    // after which a real tunnel to an allowlisted host left no trace while the
+    // bundle still read "attested, no attempts".
+    if !guard
         .recorder
-        .attempt(host, port, true, &verdict.reason, "connect");
+        .attempt(host, port, true, &verdict.reason, "connect")
+    {
+        return respond(&mut client, 503, "Service Unavailable").await;
+    }
     tunnel(guard, client, upstream, host, port).await
 }
 

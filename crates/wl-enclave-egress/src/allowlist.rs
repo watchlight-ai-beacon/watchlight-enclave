@@ -201,7 +201,6 @@ mod tests {
         assert!(Allowlist::parse("host:notaport").is_err());
         assert!(Allowlist::parse("ho st:443").is_err());
     }
-}
 
     #[test]
     fn a_wildcard_not_followed_by_a_dot_is_refused() {
@@ -243,3 +242,4 @@ mod tests {
         }
         assert!(Allowlist::parse("example.com:65535").is_ok());
     }
+}
