@@ -85,7 +85,13 @@ fn check_v4(ip: Ipv4Addr) -> Result<(), Refusal> {
     // 100.64.0.0/10 carrier-grade NAT, 192.0.0.0/24 protocol assignments,
     // 198.18.0.0/15 benchmarking, 240.0.0.0/4 reserved. Each is reachable
     // infrastructure on some networks and is never an agent's destination.
-    let reserved = (a == 100 && (64..128).contains(&b))
+    // 0.0.0.0/8 is "this host on this network" (RFC 1122) and resolves to a
+    // local interface on some stacks, so only 0.0.0.0 itself being refused
+    // left 0.0.0.1-0.255.255.255 as a loopback route. The embedded-IPv4
+    // branches in check_v6 made that reachable as ::2, ::0.0.0.2, 64:ff9b::2
+    // and ::ffff:0.0.0.2 as well.
+    let reserved = a == 0
+        || (a == 100 && (64..128).contains(&b))
         || (a == 192 && b == 0)
         || (a == 198 && (18..20).contains(&b))
         || a >= 240;
@@ -126,7 +132,9 @@ fn check_v6(ip: Ipv6Addr) -> Result<(), Refusal> {
     //
     // Judged by the v4 rules, because that is where the packet ends up.
     let v4_compatible = segments[0..6] == [0, 0, 0, 0, 0, 0] && !ip.is_unspecified();
-    let nat64 = segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..5] == [0, 0, 0];
+    let nat64 = segments[0] == 0x0064
+        && segments[1] == 0xff9b
+        && segments[2..6] == [0, 0, 0, 0];
     if v4_compatible || nat64 {
         let embedded = Ipv4Addr::new(
             (segments[6] >> 8) as u8,
@@ -142,12 +150,17 @@ fn check_v6(ip: Ipv6Addr) -> Result<(), Refusal> {
     if segments[0] & 0xfe00 == 0xfc00 {
         return Err(Refusal::Private); // fc00::/7 unique local
     }
-    // Deprecated 6to4/Teredo and the documentation range are all ways to
-    // express an inner address this check would otherwise not see.
-    if segments[0] == 0x2002 || (segments[0] == 0x2001 && segments[1] == 0x0000) {
+    // Deprecated 6to4 is a way to express an inner address this check would
+    // otherwise not see.
+    if segments[0] == 0x2002 {
         return Err(Refusal::Reserved);
     }
-    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+    // 2001::/23, IETF Protocol Assignments: Teredo (2001:0::/32), the PCP and
+    // NAT64-discovery anycast addresses (2001:1::1, 2001:1::2), benchmarking
+    // (2001:2::/48) and the documentation range (2001:db8::/32). All sit
+    // inside 2000::/3, so the global-unicast default-deny below never reaches
+    // them, and each names infrastructure rather than a destination.
+    if segments[0] == 0x2001 && (segments[1] < 0x0200 || segments[1] == 0x0db8) {
         return Err(Refusal::Reserved);
     }
     if segments[0] & 0xffc0 == 0xfec0 {
@@ -233,6 +246,40 @@ mod tests {
         // infrastructure, so it is not a path to anything.
         // ...and a genuine public address still passes.
         assert!(check("2606:4700:4700::1111".parse().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn the_zero_network_is_refused_in_every_spelling() {
+        // 0.0.0.0/8 is "this host on this network" and reaches a local
+        // interface on some stacks. Only 0.0.0.0 itself used to be refused,
+        // and the embedded-IPv4 branches made the rest reachable over v6.
+        for ip in [
+            "0.0.0.2",
+            "0.1.2.3",
+            "::2",
+            "::0.0.0.2",
+            "64:ff9b::2",
+            "64:ff9b::0.0.0.2",
+            "::ffff:0.0.0.2",
+        ] {
+            assert!(
+                check(ip.parse().unwrap()).is_err(),
+                "{ip} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn ietf_protocol_assignments_are_refused() {
+        // 2001::/23 sits inside 2000::/3, so the global-unicast default-deny
+        // does not reach it. Each of these names infrastructure.
+        assert_eq!(refused("2001:1::1"), Refusal::Reserved); // PCP anycast
+        assert_eq!(refused("2001:1::2"), Refusal::Reserved); // NAT64 discovery
+        assert_eq!(refused("2001:2::1"), Refusal::Reserved); // benchmarking
+        assert_eq!(refused("2001:db8::1"), Refusal::Reserved); // documentation
+        assert_eq!(refused("2001::1"), Refusal::Reserved); // Teredo
+        // 2001:200::/23 onward is ordinary allocated space.
+        assert!(check("2001:200::1".parse().unwrap()).is_ok());
     }
 
     #[test]

@@ -25,6 +25,7 @@ OpenShell's own audit stream.
 from __future__ import annotations
 
 import json
+import posixpath
 import shutil
 import subprocess
 from pathlib import Path
@@ -150,10 +151,24 @@ class DockerDriver:
         # they were given in. The real invariant is nesting — a mask must be
         # strictly below a mount target, or it collides with it instead of
         # covering it — so that is checked rather than assumed.
-        mount_targets = [m.target.rstrip("/") for m in spec.mounts]
+        mount_targets = [posixpath.normpath(m.target) for m in spec.mounts]
         for path in spec.shadow:
             self._reject_flaglike("shadow path", path)
-            normalised = path.rstrip("/")
+            # Normalised before the check AND before the argv, because the
+            # daemon normalises the destination itself. A prefix test on the
+            # raw string is not the same question: "/work/runs/../../etc"
+            # starts with "/work/" and passes, and the daemon then mounts the
+            # tmpfs on /etc while the run directory stays readable. The
+            # attestation would report the path as given, so the bundle would
+            # claim a mask that covered something else entirely.
+            normalised = posixpath.normpath(path)
+            if not posixpath.isabs(normalised) or normalised != path.rstrip("/"):
+                raise DriverError(
+                    f"masked path {path!r} is not a normalised absolute path "
+                    f"(it resolves to {normalised!r}); a path that changes "
+                    f"under normalisation would be checked and mounted as two "
+                    f"different locations"
+                )
             if not any(
                 normalised.startswith(target + "/") for target in mount_targets
             ):

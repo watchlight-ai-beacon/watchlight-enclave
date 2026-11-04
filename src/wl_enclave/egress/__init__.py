@@ -18,7 +18,6 @@ traffic.
 
 from __future__ import annotations
 
-import fnmatch
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,10 +66,11 @@ GUARD_RECORD_TYPES = frozenset({
 #: seeing, and discarding it would let a writer erase evidence by malforming it.
 EGRESS_UNRECOGNISED = "egress.unrecognised"
 
-_HOSTPORT = re.compile(r"^(?P<host>[A-Za-z0-9._*-]+):(?P<port>\d{1,5})$")
 
 #: Characters a hostname label sequence may contain, once any wildcard is off.
-_LABELS = re.compile(r"^[A-Za-z0-9._-]+$")
+#: Anchored with fullmatch at the call site: ``$`` also matches before a
+#: trailing newline, so "evil.com\n" read as a valid hostname.
+_LABELS = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def entry_problem(entry: str) -> Optional[str]:
@@ -88,7 +88,12 @@ def entry_problem(entry: str) -> Optional[str]:
     host, _, port_text = entry.rpartition(":")
     if not host:
         return "has no host"
-    if not port_text.isdigit():
+    # str.isdigit() accepts any Unicode decimal, including "\u00b2", which
+    # int() then refuses with a ValueError that escaped as a traceback out of
+    # `doctor`; and "\u0664\u0664\u0663", which int() happily reads as 443
+    # while the guard's u16 parser refuses it. ASCII only, so the two agree
+    # and neither crashes.
+    if not port_text or not all("0" <= ch <= "9" for ch in port_text):
         return "has a non-numeric port"
     port = int(port_text)
     # Matched to the guard, which parses the port as a u16 and refuses zero.
@@ -100,12 +105,12 @@ def entry_problem(entry: str) -> Optional[str]:
             return "has no domain after the wildcard"
         if "*" in rest:
             return 'may only use a wildcard as a leading "*."'
-        return None if _LABELS.match(rest) else "has an invalid hostname"
+        return None if _LABELS.fullmatch(rest) else "has an invalid hostname"
     if "*" in host:
         # The bug this closes: "*openai.com" once stripped to the dotless
         # suffix "openai.com", so a suffix match admitted "evilopenai.com".
         return 'may only use a wildcard as a leading "*."'
-    return None if _LABELS.match(host) else "has an invalid hostname"
+    return None if _LABELS.fullmatch(host) else "has an invalid hostname"
 
 
 class GuardError(Exception):
@@ -146,33 +151,27 @@ class Allowlist:
         self.entries = list(entries)
         self._rules: list[tuple[str, int]] = []
         for entry in self.entries:
-            m = _HOSTPORT.match(entry)
-            if not m:
-                raise GuardError(f"egress.allow: {entry!r} must be host:port")
-            self._rules.append((m.group("host").lower(), int(m.group("port"))))
+            # The same validator the configuration loader uses, and the same
+            # rules the guard enforces. This class previously had a regex of
+            # its own that was laxer than both, so Allowlist(["*openai.com:443"])
+            # and Allowlist(["host:0"]) constructed successfully — the exact
+            # loader/guard drift entry_problem exists to prevent, in the public
+            # type that documents the schema.
+            problem = entry_problem(entry)
+            if problem:
+                raise GuardError(f"egress.allow: {entry!r} {problem}")
+            host, _, port = entry.rpartition(":")
+            self._rules.append((host.lower(), int(port)))
 
     def __bool__(self) -> bool:
         return bool(self._rules)
 
-    def permits(self, host: str, port: int) -> tuple[bool, str]:
-        """Decide one attempt, returning the verdict and the reason for it.
-
-        The reason names the rule that matched, because a bundle that says
-        "denied" without saying against what is hard for a reviewer to act on.
-        """
-        host = (host or "").lower().rstrip(".")
-        for pattern, allowed_port in self._rules:
-            if port != allowed_port:
-                continue
-            if pattern == host:
-                return True, f"matched {pattern}:{allowed_port}"
-            if pattern.startswith("*.") and fnmatch.fnmatch(host, pattern):
-                # Reject the apex: "*.example.com" must not admit "example.com".
-                if host != pattern[2:]:
-                    return True, f"matched {pattern}:{allowed_port}"
-        if not self._rules:
-            return False, "no egress.allow entries; the sandbox may reach nothing"
-        return False, f"{host}:{port} is not in egress.allow"
+    # No permits() here on purpose. Enforcement lives in the guard, which is
+    # the only thing in the request path; a second matcher in Python would be a
+    # third set of semantics that nothing consults and that the next reader
+    # would reasonably mistake for the authority. The one it had disagreed with
+    # the guard: fnmatch's "*" matches the empty string, so ".openai.com"
+    # matched "*.openai.com" here and was refused there.
 
 
 @runtime_checkable

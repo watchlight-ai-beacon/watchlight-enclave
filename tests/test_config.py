@@ -194,3 +194,53 @@ def test_the_loader_uses_the_guards_own_validator():
     from wl_enclave.egress import entry_problem
 
     assert config_module.entry_problem is entry_problem
+
+
+# -- the two validators must not disagree, in either direction ------------
+
+@pytest.mark.parametrize(
+    "entry,why",
+    [
+        ("example.com:²", "superscript two: isdigit() is True, int() raises"),
+        ("example.com:٤٤٣", "Arabic-Indic digits: int() reads 443, Rust refuses"),
+        ("evil.com\n:443", "trailing newline: `$` matches before it, fullmatch does not"),
+    ],
+)
+def test_unicode_and_newline_ports_are_refused_without_crashing(tmp_path, entry, why):
+    """Each of these was accepted, and the first one crashed `doctor`.
+
+    `str.isdigit()` accepts any Unicode decimal. For U+00B2 `int()` then raises
+    a ValueError that escaped as a traceback; for Arabic-Indic digits it
+    succeeds and returns 443, while the guard's u16 parser refuses the string —
+    so the loader passed a config that produced a guard exiting on startup.
+    """
+    body = MINIMAL + f'egress:\n  allow:\n    - "{entry}"\n'
+    with pytest.raises(config.ConfigError) as exc:
+        config.load(write(tmp_path, body))
+    assert exc.value.problems, why
+
+
+def test_the_allowlist_type_uses_the_same_validator_as_the_loader():
+    """It had a regex of its own that was laxer than both the loader and guard.
+
+    `Allowlist` is public and documents the schema, so a reader would
+    reasonably take it as the authority on what a rule is.
+    """
+    from wl_enclave.egress import Allowlist, GuardError
+
+    for bad in ["*openai.com:443", "host:0", "host:70000", "evil.com\n:443"]:
+        with pytest.raises(GuardError):
+            Allowlist([bad])
+    assert Allowlist(["api.openai.com:443"]).entries == ["api.openai.com:443"]
+
+
+def test_the_allowlist_type_has_no_second_matcher():
+    """Enforcement is the guard's. A Python matcher would be a third semantics.
+
+    The one it had disagreed with the guard: fnmatch's ``*`` matches the empty
+    string, so ``.openai.com`` matched ``*.openai.com`` in Python and was
+    refused in Rust.
+    """
+    from wl_enclave.egress import Allowlist
+
+    assert not hasattr(Allowlist, "permits")

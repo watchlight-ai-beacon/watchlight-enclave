@@ -262,3 +262,32 @@ def test_the_closed_set_matches_every_type_the_guard_actually_writes():
         f"only the guard writes: {sorted(written - set(GUARD_RECORD_TYPES))}; "
         f"only the closed set has: {sorted(set(GUARD_RECORD_TYPES) - written)}"
     )
+
+
+@pytest.mark.parametrize(
+    "shadow,why",
+    [
+        ("/work/runs/../../etc", "passes a prefix test; the daemon mounts it at /etc"),
+        ("/work/.", "normalises to /work, collides with the bind, bind wins silently"),
+        ("/work/runs/./../..", "escapes the mount entirely"),
+        ("work/runs", "not absolute"),
+    ],
+)
+def test_a_mask_that_changes_under_normalisation_is_refused(shadow, why):
+    """A prefix test on the raw string asks a different question than the daemon.
+
+    Docker normalises the mount destination itself, so a path can pass the
+    check as written and be mounted somewhere else — with the attestation
+    reporting the path as given, claiming a mask over something it never
+    covered.
+    """
+    from wl_enclave.drivers import DriverError, Mount, SandboxSpec
+    from wl_enclave.drivers.docker import DockerDriver
+
+    spec = SandboxSpec(
+        name="n", image="python:3.12-slim", command=["true"],
+        mounts=[Mount(source=Path("/tmp"), target="/work")],
+        shadow=[shadow],
+    )
+    with pytest.raises(DriverError):
+        DockerDriver().provision(spec)
