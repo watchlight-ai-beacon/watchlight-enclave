@@ -143,11 +143,26 @@ class DockerDriver:
             "--cpus", str(spec.cpus),
             "--workdir", spec.workdir,
         ]
-        # After the mounts on the command line, so a shadow always wins over a
-        # bind mount that would expose the same path.
+        # Argv order is NOT what makes this work, and believing it does will
+        # cost someone the fix later: the daemon sorts mount points by
+        # destination path length before mounting, so a shorter bind target is
+        # always mounted before a longer path nested inside it, whatever order
+        # they were given in. The real invariant is nesting — a mask must be
+        # strictly below a mount target, or it collides with it instead of
+        # covering it — so that is checked rather than assumed.
+        mount_targets = [m.target.rstrip("/") for m in spec.mounts]
         for path in spec.shadow:
             self._reject_flaglike("shadow path", path)
-            args += ["--tmpfs", f"{path}:rw,noexec,nosuid,size=1m"]
+            normalised = path.rstrip("/")
+            if not any(
+                normalised.startswith(target + "/") for target in mount_targets
+            ):
+                raise DriverError(
+                    f"masked path {path!r} is not strictly below a mount target "
+                    f"({', '.join(mount_targets) or 'none'}); it would collide "
+                    f"with a mount instead of covering it"
+                )
+            args += ["--tmpfs", f"{normalised}:rw,noexec,nosuid,size=1m"]
 
         for mount in spec.mounts:
             ro = ",readonly" if mount.read_only else ""

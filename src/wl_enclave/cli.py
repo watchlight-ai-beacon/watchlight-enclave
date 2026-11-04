@@ -356,8 +356,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     # seeing, and dropping it would let a writer erase evidence
                     # by malforming it.
                     chain.append(EGRESS_UNRECOGNISED, {"declared": declared, "record": record})
-        egress_allowed = sum(1 for e in egress if e.get("verdict") == "allow")
-        egress_denied = sum(1 for e in egress if e.get("verdict") == "deny")
+        # Counted over recognised records only, so the summary cannot disagree
+        # with the chain: a record the chain shows as unrecognised must not be
+        # tallied as an ordinary attempt in run.close.
+        counted = [e for e in egress if e.get("event") in GUARD_RECORD_TYPES]
+        egress_allowed = sum(1 for e in counted if e.get("verdict") == "allow")
+        egress_denied = sum(1 for e in counted if e.get("verdict") == "deny")
+        egress_unrecognised = len(egress) - len(counted)
 
         allows = sum(1 for d in decisions if d.get("decision") == "Allow")
         denies = sum(1 for d in decisions if d.get("decision") == "Deny")
@@ -370,7 +375,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "timed_out": timed_out,
                 "decisions": len(decisions),
                 "allow": allows, "deny": denies, "needs_approval": holds,
-                "egress_attempts": len(egress),
+                "egress_attempts": len(counted),
+                "egress_unrecognised": egress_unrecognised,
                 "egress_allowed": egress_allowed,
                 "egress_denied": egress_denied,
             },

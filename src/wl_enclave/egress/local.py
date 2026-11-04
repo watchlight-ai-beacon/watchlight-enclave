@@ -69,7 +69,12 @@ GUARD_PORT = 8080
 GUARD_IMAGE = "wl-enclave/egress:latest"
 
 #: Where the guard writes its records inside its own container.
-RECORD_IN_GUARD = "/evidence/egress.jsonl"
+#:
+#: Deliberately not ``/evidence``: that name belongs to the directory shared
+#: with the sandbox, and anyone reading the guard's mount list would reasonably
+#: conclude the guard wrote into it. The whole point of this path is that it is
+#: somewhere the sandbox cannot reach.
+RECORD_IN_GUARD = "/guard/egress.jsonl"
 
 _CALL_TIMEOUT = 60
 

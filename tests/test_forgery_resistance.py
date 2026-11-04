@@ -138,6 +138,38 @@ def test_the_spec_declares_the_mask_so_a_driver_can_attest_it():
     assert spec.shadow == ["/work/runs"]
 
 
+def test_a_mask_must_be_strictly_below_a_mount_target():
+    """The invariant argv order does not provide.
+
+    The daemon mounts by destination path length, so a mask equal to or
+    shorter than a bind target collides with it rather than covering it. That
+    would leave the path exposed while the spec claimed it was masked, so the
+    driver refuses it instead of emitting it.
+    """
+    from wl_enclave.drivers import DriverError, Mount, SandboxSpec
+    from wl_enclave.drivers.docker import DockerDriver
+
+    spec = SandboxSpec(
+        name="n", image="python:3.12-slim", command=["true"],
+        mounts=[Mount(source=Path("/tmp"), target="/work")],
+        shadow=["/work"],  # equal to the mount target, not below it
+    )
+    with pytest.raises(DriverError, match="not strictly below"):
+        DockerDriver().provision(spec)
+
+
+def test_the_guard_writes_outside_the_shared_evidence_path():
+    """The in-container path must not be named /evidence either.
+
+    A reviewer reading the guard's mount list would reasonably read
+    /evidence/... as the directory shared with the sandbox, which is the exact
+    confusion the host-side split exists to remove.
+    """
+    from wl_enclave.egress.local import RECORD_IN_GUARD
+
+    assert not RECORD_IN_GUARD.startswith("/evidence")
+
+
 # -- end to end, against a real runtime ------------------------------------
 
 @pytest.mark.skipif(
