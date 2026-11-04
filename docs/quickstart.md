@@ -135,6 +135,12 @@ code inside can ignore it and open a socket directly. Here there's nowhere else
 for a packet to go. An agent that ignores the proxy doesn't escape; it just
 fails to connect.
 
+Enclave then checks that claim instead of trusting it. After the sandbox starts
+it reads the network layout back out of the runtime — the network is internal,
+the sandbox is on it and nothing else, the guard is on it and on a way out — and
+records the result as `egress.attested`. If it can't establish that, the bundle
+says so rather than implying a boundary that wasn't there.
+
 The guard also refuses an allowlisted hostname that resolves somewhere it
 shouldn't: loopback, your private ranges, and `169.254.169.254` — the cloud
 metadata address that hands out credentials to anyone who asks. It resolves
@@ -155,7 +161,8 @@ wl-enclave run --purpose "Fix PR #412"
 wl-enclave: run 20261104-204622-f49e25  agent=coder  runtime=docker
 wl-enclave: purpose: Fix PR #412
 wl-enclave: egress guard: wl-enclave-...-egress:8080 on wl-enclave-...-int
-wl-enclave: sandbox 72b83cce8713  network=none  read-only-root=True  caps-dropped=ALL
+wl-enclave: sandbox 72b83cce8713  network=wl-enclave-...-int  read-only-root=True  caps-dropped=ALL
+wl-enclave: egress     attested: the guard was the only route
 
 wl-enclave: decisions: 1 allow, 1 deny
 wl-enclave: egress:    1 allow, 1 deny
@@ -174,19 +181,25 @@ wl-enclave verify runs/<id>/bundle
 ```
 
 ```text
-wl-enclave: records  9
-wl-enclave: head     1a25c724d4101ebf…
-wl-enclave: OK — 9 records, chain intact, unsigned
+wl-enclave: records  10
+wl-enclave: head     d8a66511ae941182…
+wl-enclave: egress   attested: the guard was the sandbox's only route
+wl-enclave:          records cover http_connect only; other traffic was blocked, not recorded
+wl-enclave: OK — 10 records, chain intact, unsigned
 ```
 
-No account, no network, not even Watchlight. The bundle holds three kinds of
-record, because three different things were watching:
+No account, no network, not even Watchlight. The bundle holds four kinds of
+record, because no one layer can answer for the others:
 
 | Record | What it tells you |
 |---|---|
-| `sandbox.attested` | the constraints the sandbox ran under — no network, read-only root, capabilities dropped, memory and PID ceilings — read back **out of Docker**, not copied from what we asked for |
+| `sandbox.attested` | the constraints the sandbox ran under — no network of its own, read-only root, capabilities dropped, memory and PID ceilings — read back **out of Docker**, not copied from what we asked for |
 | `decision` | every authorization decision: who, what intent, which resource, allowed or denied |
 | `egress.attempt` | every connection the agent tried: host, port, verdict, and the rule that decided it |
+| `egress.attested` | whether the runtime *confirms* the guard was the sandbox's only route, and **what the records cover** |
+
+That last one is what stops the other three from being read for more than they
+say. See [What the bundle proves](#what-the-bundle-proves-and-what-it-doesnt).
 
 Each record is chained to the one before. Change one and every hash after it
 stops matching. Try it:
@@ -209,12 +222,29 @@ Worth reading once. Overclaiming here is how evidence loses the person you
 handed it to.
 
 **It establishes** every authorization decision, every HTTPS destination the
-agent tried, and the constraints the sandbox ran under.
+agent tried, the constraints the sandbox ran under, and whether the runtime
+confirms the guard was its only route.
 
 **It doesn't establish** attempts that don't speak HTTP CONNECT. A raw socket to
 some arbitrary port is still refused — there's no route — but the guard can't
 name it in a record, so it shows up as a failed connection inside the agent
-rather than a line in your bundle. Blocked, but not described.
+rather than a line in your bundle. Blocked, but not described. The bundle says
+this itself rather than leaving you to work it out: `records_cover` lists what
+could be recorded, and `blocked_not_recorded` lists what couldn't.
+
+**Read "attested" and "complete" as different claims.** A run can be fully
+attested and still hold no record of a raw socket. The attestation also says how
+strongly it was checked: `enforcement: network_topology` with `verified_by:
+runtime_readback` means the layout was read back once, after the sandbox
+started — so a route added later in the run wouldn't appear. A packet filter
+inside the sandbox's own network namespace is what turns that into a continuous
+guarantee, and where a runtime provides one, Enclave should consume its events
+rather than reimplement them.
+
+**If `route_exclusive` is `false`**, the sandbox had another path to the network.
+The proxy variables were then advice it could ignore, and the egress records are
+a lower bound rather than an account. `verify` says so plainly, because a bundle
+that is quietly incomplete is worse than one that admits the gap.
 
 **It's unsigned.** The chain catches edits and corruption. It does not prove who
 produced it: anyone who can edit the file can also recompute the chain over
@@ -242,7 +272,8 @@ only one match.
 
 - [`examples/coder`](../examples/coder/README.md) — the misbehaving agent from
   this guide, with a note on which layer stops each of its five attempts and
-  some suggestions for breaking it on purpose.
+  some suggestions for breaking it on purpose, including breaking the
+  attestation deliberately.
 - [Watchlight Developer Edition](https://github.com/watchlight-ai-beacon/watchlight-de)
   — the engine, the policy language, and plugins for LangGraph, Pydantic AI, the
   Claude Agent SDK and others.

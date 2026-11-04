@@ -467,14 +467,16 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     _say(f"bundle   {bundle}")
     _say(f"records  {result.records}")
     _say(f"head     {result.head[:16]}…")
-    for problem in result.problems:
-        print(f"            - {problem}")
+    # Facts first, then problems, then the verdict. Problems read as part of
+    # the verdict they cause, so nothing should come between them.
     if result.egress_attested is True:
         _say("egress   attested: the guard was the sandbox's only route")
         covers = ", ".join(result.egress_covers or []) or "unstated"
         _say(f"         records cover {covers} only; other traffic was blocked, not recorded")
     elif result.egress_attested is False:
         _say("egress   NOT attested: the sandbox may have had another route")
+    for problem in result.problems:
+        print(f"            - {problem}")
     _say(result.summary)
     if result.egress_attested is False:
         _say(
