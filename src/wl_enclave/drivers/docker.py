@@ -143,6 +143,12 @@ class DockerDriver:
             "--cpus", str(spec.cpus),
             "--workdir", spec.workdir,
         ]
+        # After the mounts on the command line, so a shadow always wins over a
+        # bind mount that would expose the same path.
+        for path in spec.shadow:
+            self._reject_flaglike("shadow path", path)
+            args += ["--tmpfs", f"{path}:rw,noexec,nosuid,size=1m"]
+
         for mount in spec.mounts:
             ro = ",readonly" if mount.read_only else ""
             args += [

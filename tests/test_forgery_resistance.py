@@ -1,0 +1,184 @@
+"""The agent must not be able to write the evidence that describes it.
+
+Every test here corresponds to a way a sandboxed agent was once able to put
+records of its own choosing into its own bundle. They are regression tests for
+a specific class of failure: not a crash, but a bundle that verifies cleanly
+while describing a run that did not happen.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import uuid
+from pathlib import Path
+
+import pytest
+
+from wl_enclave import evidence, runs
+from wl_enclave.cli import _shadow_for_runs
+from wl_enclave.egress import EGRESS_UNRECOGNISED, GUARD_RECORD_TYPES
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+# -- the run's own evidence is out of the workspace mount --------------------
+
+def test_the_guard_file_is_not_under_the_sandbox_writable_directory():
+    """The guard is a witness; the subject must not share its notebook.
+
+    ``evidence/`` has to be writable by the sandbox, because the SDK writes the
+    decision trail from inside it. If the guard wrote there too, the agent could
+    truncate the file or unlink and recreate it, leaving the guard appending to
+    an orphaned inode.
+    """
+    run = runs.run_dir("/anywhere", "20260101-000000-aaaaaa")
+    assert run.evidence_dir not in run.egress_file.parents
+    assert run.guard_dir != run.evidence_dir
+
+
+def test_runs_inside_the_workspace_are_shadowed():
+    assert _shadow_for_runs(Path("/proj"), Path("/proj/runs")) == ["/work/runs"]
+
+
+def test_a_runs_directory_outside_the_workspace_needs_no_shadow():
+    assert _shadow_for_runs(Path("/proj"), Path("/elsewhere/runs")) == []
+
+
+def test_a_nested_runs_directory_is_shadowed_at_its_real_depth():
+    assert _shadow_for_runs(Path("/proj"), Path("/proj/var/runs")) == ["/work/var/runs"]
+
+
+# -- the orchestrator owns the record type namespace ------------------------
+
+@pytest.mark.parametrize(
+    "declared",
+    ["decision", "sandbox.attested", "egress.attested", "run.close", "run.open", None, "", 7],
+)
+def test_a_guard_record_cannot_name_a_type_outside_the_closed_set(declared):
+    """A record that chooses its own type can forge another layer's evidence.
+
+    These are written by a separate process into a file on disk, so the type
+    they land under has to be decided here, against a closed set, and never
+    read out of the record.
+    """
+    assert declared not in GUARD_RECORD_TYPES
+
+
+@pytest.mark.parametrize("declared", sorted(GUARD_RECORD_TYPES))
+def test_the_guards_own_types_are_accepted(declared):
+    assert declared in GUARD_RECORD_TYPES
+
+
+def test_the_closed_set_does_not_admit_any_non_egress_type():
+    assert all(t.startswith("egress.") for t in GUARD_RECORD_TYPES)
+    for forgeable in ("decision", "sandbox.attested", "run.open", "run.close",
+                      "run.contained", "run.error", "egress.guard_started"):
+        assert forgeable not in GUARD_RECORD_TYPES
+
+
+def test_an_unrecognised_record_is_kept_rather_than_dropped():
+    """Dropping it would let a writer erase evidence by malforming it."""
+    assert EGRESS_UNRECOGNISED.startswith("egress.")
+    assert EGRESS_UNRECOGNISED not in GUARD_RECORD_TYPES
+
+
+# -- verify resists an appended attestation --------------------------------
+
+def _bundle(tmp_path, records):
+    w = evidence.ChainWriter(tmp_path)
+    for type_, data in records:
+        w.append(type_, data)
+    w.seal({"run": "t", "agent": "a", "runtime": "docker"})
+    return tmp_path
+
+
+def test_a_second_attestation_is_a_problem_and_the_first_still_wins(tmp_path):
+    """The forgery that mattered most: append a flattering attestation.
+
+    Taking the last would let anything able to append a record overwrite the
+    finding. A run writes exactly one, so a second means something else did.
+    """
+    bundle = _bundle(tmp_path, [
+        ("run.open", {"run": "t"}),
+        ("egress.attested", {"route_exclusive": False, "records_cover": ["http_connect"],
+                             "problems": ["the sandbox is also attached to bridge"]}),
+        ("egress.attested", {"route_exclusive": True,
+                             "records_cover": ["tcp", "udp", "dns"], "problems": []}),
+    ])
+    result = evidence.verify(bundle)
+    assert result.egress_attested is False, "the first attestation must win"
+    assert result.egress_covers == ["http_connect"]
+    assert not result.ok
+    assert any("egress attestations" in p for p in result.problems)
+
+
+def test_one_attestation_is_reported_without_complaint(tmp_path):
+    bundle = _bundle(tmp_path, [
+        ("run.open", {"run": "t"}),
+        ("egress.attested", {"route_exclusive": True, "records_cover": ["http_connect"]}),
+    ])
+    result = evidence.verify(bundle)
+    assert result.ok and result.egress_attested is True
+
+
+# -- end to end, against a real runtime ------------------------------------
+
+@pytest.mark.skipif(
+    shutil.which("docker") is None
+    or subprocess.run(["docker", "info"], capture_output=True).returncode != 0,
+    reason="needs a running Docker daemon",
+)
+def test_a_sandbox_cannot_see_its_own_run_directory(tmp_path):
+    """The proof, not the argument.
+
+    The project root is mounted read-write at /work and the run directory lives
+    inside it, so without a shadow the agent can reach its own bundle. The
+    sandbox reports what it can see; the assertion is that it sees nothing.
+    """
+    # The runtime may be VM-backed, where only the home directory is shared.
+    project = Path.home() / f".wl-test-{uuid.uuid4().hex[:8]}"
+    (project / "policies").mkdir(parents=True)
+    (project / "policies" / "p.policy.json").write_text(
+        '[{"name": "p", "code": "permit(principal, action, resource);"}]'
+    )
+    (project / "enclave.yaml").write_text(
+        "version: 1\n"
+        "agent:\n"
+        '  name: probe\n'
+        '  command: ["python", "/work/probe.py"]\n'
+        "  image: python:3.12-slim\n"
+        "runtime: docker\n"
+        "policy: ./policies\n"
+        "egress:\n  allow: []\n"
+        "limits:\n  memory: 512Mi\n  cpus: 1\n  pids: 128\n  timeout: 2m\n"
+    )
+    (project / "probe.py").write_text(
+        "import json, pathlib\n"
+        "seen = sorted(p.name for p in pathlib.Path('/work/runs').glob('*'))\n"
+        "wrote = []\n"
+        "for p in pathlib.Path('/work/runs').glob('*/bundle'):\n"
+        "    try:\n"
+        "        (p / 'agent-was-here').write_text('x')\n"
+        "        wrote.append(str(p))\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "print('PROBE ' + json.dumps({'seen': seen, 'wrote': wrote}))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [str(REPO / ".venv" / "bin" / "wl-enclave"), "-C", str(project),
+             "run", "--purpose", "shadow regression"],
+            capture_output=True, text=True, timeout=600,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        logs = next(project.glob("runs/*/logs.txt")).read_text()
+        line = next(l for l in logs.splitlines() if l.startswith("PROBE "))
+        found = json.loads(line[len("PROBE "):])
+        assert found["seen"] == [], f"the sandbox saw its own run dirs: {found['seen']}"
+        assert found["wrote"] == [], f"the sandbox wrote into its own bundle: {found['wrote']}"
+        # And nothing was actually created on the host.
+        assert list(project.glob("runs/*/bundle/agent-was-here")) == []
+    finally:
+        shutil.rmtree(project, ignore_errors=True)

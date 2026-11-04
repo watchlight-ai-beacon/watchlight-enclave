@@ -21,7 +21,13 @@ from typing import Optional
 
 from . import __version__, config, evidence, runs
 from .drivers import DriverError, Mount, SandboxSpec, get_driver
-from .egress import Allowlist, GuardError, get_guard
+from .egress import (
+    EGRESS_UNRECOGNISED,
+    GUARD_RECORD_TYPES,
+    Allowlist,
+    GuardError,
+    get_guard,
+)
 
 CONFIG_NAME = "enclave.yaml"
 
@@ -265,6 +271,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "WL_ENCLAVE_AGENT": cfg.agent.name,
             "WL_ENCLAVE_POLICY": "/policy",
         },
+        # The workspace is the project root, and the run directory lives inside
+        # it. Without a shadow the agent could reach /work/runs/<id>/bundle and
+        # rewrite the chain describing itself while the run was still going.
+        shadow=_shadow_for_runs(cfg.root, cfg.root / runs.RUNS_DIR),
         mounts=[
             Mount(source=cfg.root, target="/work", read_only=False),
             Mount(source=cfg.policy, target="/policy", read_only=True),
@@ -333,7 +343,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
             egress = read_egress_records(run.egress_file)
             for record in egress:
-                chain.append(record.get("event", "egress.attempt"), record)
+                # The type is chosen here, against a closed set, and is never
+                # taken from the record. These records are written by another
+                # process; one that could name its own type could claim to be a
+                # `decision` or a `sandbox.attested` and forge a record for a
+                # layer that never ran.
+                declared = record.get("event")
+                if declared in GUARD_RECORD_TYPES:
+                    chain.append(declared, record)
+                else:
+                    # Kept, not dropped: an unrecognised record is itself worth
+                    # seeing, and dropping it would let a writer erase evidence
+                    # by malforming it.
+                    chain.append(EGRESS_UNRECOGNISED, {"declared": declared, "record": record})
         egress_allowed = sum(1 for e in egress if e.get("verdict") == "allow")
         egress_denied = sum(1 for e in egress if e.get("verdict") == "deny")
 
@@ -459,6 +481,20 @@ def _cmd_kill(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------- verify ---
+def _shadow_for_runs(root: Path, runs_root: Path) -> list[str]:
+    """In-sandbox paths to cover so the run cannot see its own evidence.
+
+    Returns the workspace-relative location of ``runs/`` when it sits inside
+    the directory mounted at ``/work``. When it does not, there is nothing to
+    hide and the list is empty.
+    """
+    try:
+        relative = runs_root.resolve().relative_to(root.resolve())
+    except ValueError:
+        return []
+    return [f"/work/{relative.as_posix()}"]
+
+
 def _cmd_verify(args: argparse.Namespace) -> int:
     bundle = Path(args.bundle)
     if bundle.name != "bundle" and (bundle / "bundle").is_dir():

@@ -4,13 +4,15 @@ One directory per run, named so that listing them is chronological::
 
     runs/20261104-203145-7f3a1c/
         evidence/audit.jsonl   mounted into the sandbox; Watchlight writes here
-        evidence/egress.jsonl  mounted into the guard; every attempt lands here
+        guard/egress.jsonl     mounted into the GUARD only; every attempt lands here
         bundle/chain.jsonl     the hash-chained evidence
         bundle/manifest.json   written when the run is sealed
         logs.txt               whatever the sandbox printed
 
 ``evidence/`` is the one path the sandbox can write to that outlives it, which
-is what lets a contained run still produce a bundle.
+is what lets a contained run still produce a bundle. It is therefore also the
+one directory whose contents are attacker-controlled, so ``guard/`` and
+``bundle/`` are kept out of the sandbox entirely.
 """
 
 from __future__ import annotations
@@ -50,11 +52,24 @@ class Run:
         return self.evidence_dir / "audit.jsonl"
 
     @property
+    def guard_dir(self) -> Path:
+        """Written by the egress guard, and **never mounted into the sandbox**.
+
+        Deliberately not under :attr:`evidence_dir`. That directory has to be
+        writable by the sandbox, because the Watchlight SDK writes its decision
+        trail from inside it. The guard's records must not be: the guard exists
+        to be a witness the agent cannot influence, and a witness whose notes
+        the subject can edit is not one. Sharing the directory would let the
+        agent truncate the file, or unlink and recreate it so the guard went on
+        writing to an orphaned inode while the host read the agent's version.
+        """
+        return self.dir / "guard"
+
+    @property
     def egress_file(self) -> Path:
-        """The egress guard's record of every attempt, written from its own
-        container. Kept beside the decision trail because the two are peers:
-        one says what authority the agent had, the other where it tried to go."""
-        return self.evidence_dir / "egress.jsonl"
+        """The guard's record of every attempt, in a directory the sandbox
+        cannot reach."""
+        return self.guard_dir / "egress.jsonl"
 
     @property
     def bundle_dir(self) -> Path:
@@ -70,6 +85,7 @@ class Run:
 
     def create(self) -> "Run":
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        self.guard_dir.mkdir(parents=True, exist_ok=True)
         self.bundle_dir.mkdir(parents=True, exist_ok=True)
         return self
 

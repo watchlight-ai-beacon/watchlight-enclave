@@ -317,12 +317,23 @@ def verify(bundle_dir: Path) -> VerifyResult:
     # Read from the chain rather than recomputed: this reports what the run
     # claimed about its own topology, which the chain's integrity is what makes
     # trustworthy. A bundle with no such record ran without a guard.
+    # The FIRST attestation wins, and a second is a problem rather than an
+    # update. Taking the last would let anything able to append a record
+    # overwrite the finding with a more flattering one; a run writes exactly
+    # one, so more than one means something else wrote it.
     egress_attested: Optional[bool] = None
     egress_covers: Optional[list] = None
-    for record in records:
-        if record.type == "egress.attested":
-            egress_attested = bool(record.data.get("route_exclusive"))
-            egress_covers = record.data.get("records_cover")
+    attestations = [r for r in records if r.type == "egress.attested"]
+    if attestations:
+        first = attestations[0]
+        egress_attested = bool(first.data.get("route_exclusive"))
+        egress_covers = first.data.get("records_cover")
+    if len(attestations) > 1:
+        problems.append(
+            f"{CHAIN_FILE}: {len(attestations)} egress attestations, but a run "
+            f"writes one — the extra records did not come from this run's guard "
+            f"(reporting the first, at seq {attestations[0].seq})"
+        )
 
     return VerifyResult(
         ok=not problems,

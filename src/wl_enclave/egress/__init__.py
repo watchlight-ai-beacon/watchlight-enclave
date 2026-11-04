@@ -26,6 +26,8 @@ from typing import Optional, Protocol, runtime_checkable
 
 __all__ = [
     "EGRESS_ATTESTED",
+    "EGRESS_UNRECOGNISED",
+    "GUARD_RECORD_TYPES",
     "EGRESS_RECORD",
     "Allowlist",
     "EgressEndpoint",
@@ -44,6 +46,24 @@ EGRESS_ATTESTED = "egress.attested"
 #: ``"allow"`` or ``"deny"``. No request body, no headers, no credentials: a
 #: record says *where* and *whether*, never *what*.
 EGRESS_RECORD = "egress.attempt"
+
+#: Every chain record type a guard is permitted to contribute.
+#:
+#: A guard's records arrive as data, so the type they land under is chosen by
+#: the orchestrator against this set and never read out of the record itself. A
+#: record that could name its own type could name ``decision`` or
+#: ``sandbox.attested`` and forge a record belonging to a layer that never ran
+#: — inside a chain that would then hash the forgery faithfully.
+GUARD_RECORD_TYPES = frozenset({
+    "egress.attempt",
+    "egress.tunnel",
+    "egress.records_suppressed",
+})
+
+#: Where a record whose declared type is not in :data:`GUARD_RECORD_TYPES` is
+#: put. It is kept rather than dropped: an unrecognised record is itself worth
+#: seeing, and discarding it would let a writer erase evidence by malforming it.
+EGRESS_UNRECOGNISED = "egress.unrecognised"
 
 _HOSTPORT = re.compile(r"^(?P<host>[A-Za-z0-9._*-]+):(?P<port>\d{1,5})$")
 

@@ -54,6 +54,11 @@ class SandboxSpec:
     workdir: str = "/work"
     env: dict[str, str] = field(default_factory=dict)
     mounts: list[Mount] = field(default_factory=list)
+    #: Paths inside the sandbox to cover with an empty writable filesystem,
+    #: hiding whatever a mount would otherwise expose there. Used to keep the
+    #: run's own evidence out of reach of a workspace mount that would
+    #: otherwise contain it.
+    shadow: list[str] = field(default_factory=list)
     network: str = "none"
     memory_bytes: int = 2 * 1024**3
     cpus: float = 2.0
