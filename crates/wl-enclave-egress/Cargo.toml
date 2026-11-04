@@ -1,0 +1,22 @@
+[package]
+name = "wl-enclave-egress"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+description = "Watchlight AI Enclave egress guard — a CONNECT allowlist that records every attempt."
+
+[dependencies]
+# Deliberately two dependencies. This binary sits in the agent's data path, so
+# its dependency surface is part of its threat model.
+tokio = { version = "1.43.0", features = [
+    "rt-multi-thread", "net", "io-util", "macros", "time", "sync", "signal",
+] }
+serde_json = "1.0.135"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

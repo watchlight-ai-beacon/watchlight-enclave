@@ -25,6 +25,25 @@ _DURATION = re.compile(r"^(\d+)(s|m|h)$")
 _SIZE = re.compile(r"^(\d+)(Mi|Gi)$", re.IGNORECASE)
 _HOSTPORT = re.compile(r"^(?P<host>[A-Za-z0-9._*-]+):(?P<port>\d{1,5})$")
 
+#: An OCI image reference, constrained enough to be safe as an argv element.
+#:
+#: This is not a full implementation of the reference grammar. Its job is
+#: narrower and security-critical: ``docker run`` treats every argument up to
+#: the image as a flag, so an image value of ``--privileged`` (or
+#: ``--network=host``, ``--cap-add=ALL``) would be parsed as one and would
+#: defeat the isolation flags the driver sets. Anything that is not plainly a
+#: reference is refused.
+_IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,255}$")
+
+
+def _valid_image_ref(value: str) -> bool:
+    """Whether ``value`` is safe to pass as the image argument.
+
+    Rejects a leading ``-`` outright: that is the argument-injection case, and
+    no legitimate reference begins with one.
+    """
+    return bool(value) and not value.startswith("-") and bool(_IMAGE_REF.match(value))
+
 
 class ConfigError(Exception):
     """``enclave.yaml`` is missing, malformed, or refers to something absent.
@@ -154,6 +173,11 @@ def load(path: Path) -> Config:
             problems.append("agent: one of image: or build: is required")
         if image is not None and build is not None:
             problems.append("agent: give image: or build:, not both")
+        if isinstance(image, str) and not _valid_image_ref(image):
+            problems.append(
+                f"agent.image: {image!r} is not a valid image reference "
+                f"(it would be passed to the runtime as an argument)"
+            )
         agent = Agent(
             name=name,
             command=list(command),

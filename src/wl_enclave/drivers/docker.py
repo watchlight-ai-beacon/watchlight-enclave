@@ -97,8 +97,32 @@ class DockerDriver:
             ]
         return []
 
+    @staticmethod
+    def _reject_flaglike(label: str, value: str) -> None:
+        """Refuse a value that the runtime CLI would read as a flag.
+
+        Defence in depth: ``config`` already validates the image reference, but
+        this driver must not depend on having been called through it. Every
+        argv element that is not a literal we wrote is checked here, because
+        ``docker run`` parses flags until the image and an injected
+        ``--privileged`` or ``--network=host`` would silently undo every
+        isolation flag set below.
+        """
+        if not value or value.startswith("-"):
+            raise DriverError(
+                f"{label}: {value!r} would be read as a command-line flag by "
+                f"{'docker' if value else 'the runtime'}, so it is refused"
+            )
+
     def provision(self, spec: SandboxSpec) -> Sandbox:
         """Create and start the sandbox, detached."""
+        # Checked before anything is built: these are the only argv elements
+        # that are not literals chosen by this module.
+        self._reject_flaglike("agent.image", spec.image)
+        self._reject_flaglike("sandbox name", spec.name)
+        for key in spec.env:
+            self._reject_flaglike("env name", key)
+
         args: list[str] = [
             "run",
             "--detach",
@@ -210,6 +234,7 @@ class DockerDriver:
         runtime takes a prebuilt image has nothing to implement. Callers probe
         for it with :func:`hasattr`.
         """
+        self._reject_flaglike("image tag", tag)
         self._run(
             "build",
             "--file", str(dockerfile),

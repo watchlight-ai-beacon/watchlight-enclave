@@ -1,0 +1,20 @@
+# Shoalscan policy for Watchlight AI Enclave.
+#
+# On a pull request this file, the baseline and the rule directories are read
+# from the BASE commit (`--policy-ref`), never from the change itself, so a
+# change cannot exclude its own files or accept its own findings.
+
+scanners = ["opengrep", "gitleaks", "hadolint"]
+
+# Paths every scanner skips (gitignore style). Each entry is either not our
+# source, or is generated.
+excludes = [
+  "target",          # Rust build output, at any depth
+  ".venv",
+  "node_modules",
+  "runs",            # per-run evidence from local runs
+  "*.min.js",
+]
+
+# Severities that fail a pull request.
+blocking = ["ERROR", "WARNING"]

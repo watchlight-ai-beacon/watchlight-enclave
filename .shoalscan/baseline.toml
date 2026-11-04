@@ -1,0 +1,21 @@
+# Shoalscan baseline: known findings that do not fail `shoalscan check`.
+# Each entry names an issue and a reason. Remove an entry when its finding is fixed;
+# an entry that no longer matches a finding fails the check.
+
+version = 1
+
+[[finding]]
+tool = "opengrep"
+rule = "community.python.lang.security.audit.dangerous-subprocess-use-audit"
+path = "src/wl_enclave/drivers/docker.py"
+fingerprint = "03d0556da4686284cd7c445b7341bf81:0"
+issue = "#1"
+reason = "Audit-class rule: dangerous-subprocess-use-audit fires on any non-static subprocess argv and cannot see the mitigation. Calls use the list form with shell=False (no shell, no shell injection) and the binary is constrained to docker/podman by get_driver(). The real risk was argument injection, since docker run parses flags up to the image; it is mitigated by config._valid_image_ref() and DockerDriver._reject_flaglike(), both tested. Full review in #1."
+
+[[finding]]
+tool = "opengrep"
+rule = "community.python.lang.security.audit.dangerous-subprocess-use-audit"
+path = "src/wl_enclave/drivers/docker.py"
+fingerprint = "29e09c72b68e0b9e3d7563327be66eb1:0"
+issue = "#1"
+reason = "Audit-class rule: dangerous-subprocess-use-audit fires on any non-static subprocess argv and cannot see the mitigation. Calls use the list form with shell=False (no shell, no shell injection) and the binary is constrained to docker/podman by get_driver(). The real risk was argument injection, since docker run parses flags up to the image; it is mitigated by config._valid_image_ref() and DockerDriver._reject_flaglike(), both tested. Full review in #1."

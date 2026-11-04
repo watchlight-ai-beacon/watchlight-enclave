@@ -1,5 +1,5 @@
 # build + runtime
-/target/
+target/
 __pycache__/
 *.py[cod]
 .venv/
@@ -13,3 +13,6 @@ runs/
 
 # os
 .DS_Store
+
+# shoalscan scan output (the baseline and policy ARE committed)
+.shoalscan/runs/
