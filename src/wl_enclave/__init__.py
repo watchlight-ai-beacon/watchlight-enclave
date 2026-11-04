@@ -1,4 +1,4 @@
-"""``wl-enclave`` — a governed, isolated runtime for autonomous AI agents.
+"""Watchlight AI Enclave — a governed, isolated runtime for autonomous AI agents.
 
 Two layers enforce on every run. The :mod:`~wl_enclave.drivers` runtime decides
 where the agent may connect; Watchlight decides what authority it has. Both are

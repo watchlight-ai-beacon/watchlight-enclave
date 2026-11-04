@@ -175,8 +175,11 @@ def load(path: Path) -> Config:
     resolved_policy = policy if policy.is_absolute() else path.parent / policy
     if not resolved_policy.exists():
         problems.append(f"policy: {policy} does not exist")
-    elif resolved_policy.is_dir() and not any(resolved_policy.glob("*.cedar")):
-        problems.append(f"policy: {policy} holds no .cedar files")
+    elif resolved_policy.is_dir() and not any(resolved_policy.glob("*.policy.json")):
+        problems.append(
+            f"policy: {policy} holds no *.policy.json files "
+            f"(the Watchlight policy-file format)"
+        )
 
     # --- mcp ---------------------------------------------------------------
     mcp_raw = raw.get("mcp") or {}
@@ -255,7 +258,7 @@ agent:
 
 runtime: docker                # docker | podman | openshell
 
-policy: ./policies             # Cedar bundle; compiled to BOTH layers
+policy: ./policies             # *.policy.json bundle; feeds BOTH layers
 
 mcp:
   servers: []                  # MCP servers to intercept, by name

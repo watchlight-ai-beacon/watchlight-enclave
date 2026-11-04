@@ -1,12 +1,12 @@
-# Watchlight — Enclave
+# Watchlight AI Enclave
 
 **A governed, isolated runtime for autonomous AI agents.**
 
-Enclave runs an agent inside a sandbox and puts a policy decision point in front
-of every tool call it makes. Two layers enforce at once: the sandbox decides
-where the agent may connect, and [Watchlight](https://github.com/watchlight-ai-beacon/watchlight-de)
-decides what authority it has. Every run produces a verifiable evidence bundle
-covering both.
+Watchlight AI Enclave runs an agent inside a sandbox and puts a policy decision
+point in front of every tool call it makes. Two layers enforce at once: the
+sandbox decides where the agent may connect, and
+[Watchlight](https://github.com/watchlight-ai-beacon/watchlight-de) decides what
+authority it has. Every run produces a verifiable evidence bundle covering both.
 
 > **Status: early development.** No releases yet. The CLI, the config format and
 > the evidence bundle are all subject to change.
@@ -78,7 +78,7 @@ deterministic. The evidence format is documented and verifiable with
 part we hold; the format you can read yourself.
 
 Want the engine source, an air-gapped build, or to govern a fleet in
-production? [email sales@watchlight.ai](mailto:sales@watchlight.ai?subject=Watchlight%20Enclave).
+production? [email sales@watchlight.ai](mailto:sales@watchlight.ai?subject=Watchlight%20AI%20Enclave).
 
 ## Contributing
 

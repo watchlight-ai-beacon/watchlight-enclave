@@ -1,0 +1,22 @@
+version: 1
+
+agent:
+  name: coder
+  command: ["python", "agent.py"]
+  build: ./Dockerfile
+
+runtime: docker
+
+policy: ./policies
+
+mcp:
+  servers: []
+
+egress:
+  allow: []
+
+limits:
+  memory: 1Gi
+  cpus: 2
+  pids: 256
+  timeout: 5m

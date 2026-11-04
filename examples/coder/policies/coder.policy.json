@@ -1,0 +1,10 @@
+[
+  {
+    "name": "coder-research",
+    "code": "permit(principal, action == Action::\"research\", resource);"
+  },
+  {
+    "name": "coder-no-exfiltrate",
+    "code": "@enforcement_effect(\"quarantine\")\nforbid(principal, action == Action::\"exfiltrate\", resource);"
+  }
+]

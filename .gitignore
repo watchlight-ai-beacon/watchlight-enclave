@@ -8,7 +8,7 @@ build/
 
 # enclave run artifacts
 .watchlight/
-/runs/
+runs/
 *.tgz
 
 # os
