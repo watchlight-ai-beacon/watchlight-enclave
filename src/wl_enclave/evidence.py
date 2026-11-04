@@ -1,8 +1,8 @@
 """The evidence bundle — a hash-chained record of what a run was allowed to do.
 
 A bundle answers one question for a reviewer who was not there and does not
-trust us: *what did this agent actually do, and what stopped it?* It carries two
-kinds of record, because the two layers see different things:
+trust us: *what did this agent actually do, and what stopped it?* It carries
+three kinds of record, because no one layer can answer for the others:
 
 ``sandbox.attested``
     What the isolation runtime reports the sandbox is constrained to, read back
@@ -11,6 +11,19 @@ kinds of record, because the two layers see different things:
 ``decision``
     Every authorization decision Watchlight made, with the principal, the
     declared intent, the resource and the verdict.
+
+``egress.attempt``
+    Every connection the sandbox tried to open, with the host, the port, the
+    verdict and the rule that decided it. Watchlight knows the agent asked to
+    use a tool; only something in the network path knows where it then tried
+    to go.
+
+``egress.attested``
+    Whether the runtime confirms the guard was the sandbox's *only* route, read
+    back from the runtime rather than assumed. This is what makes the
+    ``egress.attempt`` records an account rather than a lower bound: if the
+    sandbox had a second path to the network, anything it sent that way is
+    absent from the bundle, and a reviewer has to know that.
 
 Each record is chained to the one before it, so a record cannot be removed,
 reordered or edited without breaking every hash that follows. ``wl-enclave
@@ -216,6 +229,15 @@ class VerifyResult:
     head: str
     problems: list[str]
     signed: bool = False
+    #: ``True`` when the runtime confirmed the guard was the sandbox's only
+    #: route, ``False`` when it did not, ``None`` when no guard ran. Not a
+    #: chain problem: the chain can be perfectly intact and still describe a
+    #: run whose egress was unmediated, which is exactly why it is separate.
+    egress_attested: Optional[bool] = None
+    #: What classes of attempt the guard could record at all. An attested run
+    #: covering only ``http_connect`` still holds no record of a raw socket, so
+    #: the two facts have to be read together.
+    egress_covers: Optional[list] = None
 
     @property
     def summary(self) -> str:
@@ -292,10 +314,22 @@ def verify(bundle_dir: Path) -> VerifyResult:
                     f"the chain holds {len(records)}"
                 )
 
+    # Read from the chain rather than recomputed: this reports what the run
+    # claimed about its own topology, which the chain's integrity is what makes
+    # trustworthy. A bundle with no such record ran without a guard.
+    egress_attested: Optional[bool] = None
+    egress_covers: Optional[list] = None
+    for record in records:
+        if record.type == "egress.attested":
+            egress_attested = bool(record.data.get("route_exclusive"))
+            egress_covers = record.data.get("records_cover")
+
     return VerifyResult(
         ok=not problems,
         records=len(records),
         head=head,
         problems=problems,
         signed=False,
+        egress_attested=egress_attested,
+        egress_covers=egress_covers,
     )

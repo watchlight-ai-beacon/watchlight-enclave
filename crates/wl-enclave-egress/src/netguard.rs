@@ -4,13 +4,13 @@
 //! Two attacks follow from that, and both are standard against forward
 //! proxies:
 //!
-//! * **DNS rebinding / TOCTOU.** The guard resolves `api.example.com`,
-//!   validates the answer, and then connects *by name again*. A resolver
-//!   controlled or poisoned by the agent returns a public address for the
-//!   check and a private one for the connection. The defence is structural:
-//!   resolve once, validate the resulting addresses, and dial **the validated
-//!   `SocketAddr`** — never the name a second time. This module exists so that
-//!   ordering cannot be got wrong by accident.
+//! * **DNS rebinding / TOCTOU.** The mistake to avoid is resolving
+//!   `api.example.com`, validating the answer, and then connecting *by name a
+//!   second time*: a resolver the agent controls or has poisoned can return a
+//!   public address for the check and a private one for the connection. The
+//!   defence is structural rather than careful — resolve once, validate the
+//!   resulting addresses, and dial **the validated `SocketAddr`**. This module
+//!   exists so that ordering cannot be got wrong by accident.
 //!
 //! * **Cloud metadata and internal-range access.** `169.254.169.254` is the
 //!   single most valuable target for an agent that has escaped its remit: it

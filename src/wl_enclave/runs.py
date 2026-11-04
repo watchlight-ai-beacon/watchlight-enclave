@@ -4,6 +4,7 @@ One directory per run, named so that listing them is chronological::
 
     runs/20261104-203145-7f3a1c/
         evidence/audit.jsonl   mounted into the sandbox; Watchlight writes here
+        evidence/egress.jsonl  mounted into the guard; every attempt lands here
         bundle/chain.jsonl     the hash-chained evidence
         bundle/manifest.json   written when the run is sealed
         logs.txt               whatever the sandbox printed
@@ -47,6 +48,13 @@ class Run:
     def audit_file(self) -> Path:
         """Watchlight's decision trail, as written from inside the sandbox."""
         return self.evidence_dir / "audit.jsonl"
+
+    @property
+    def egress_file(self) -> Path:
+        """The egress guard's record of every attempt, written from its own
+        container. Kept beside the decision trail because the two are peers:
+        one says what authority the agent had, the other where it tried to go."""
+        return self.evidence_dir / "egress.jsonl"
 
     @property
     def bundle_dir(self) -> Path:

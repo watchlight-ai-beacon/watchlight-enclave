@@ -20,6 +20,9 @@ classifiers = [
 ]
 dependencies = ["PyYAML>=6.0"]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.3.4"]
+
 [project.scripts]
 wl-enclave = "wl_enclave.cli:main"
 

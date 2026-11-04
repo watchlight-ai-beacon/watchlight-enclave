@@ -1,15 +1,13 @@
 //! Which `host:port` the sandbox may reach. Everything else is refused.
 //!
-//! The matching semantics are lifted from `wl-proxy`'s `routing/rules.rs`
-//! (`Router::match_host`): try an exact hostname first, then a `*.` pattern as
-//! a suffix match. They are reproduced here rather than reimplemented so that
-//! this open-source guard and the reduced `wl-proxy` profile that eventually
-//! replaces it agree by construction, instead of having to be reconciled.
+//! Two rules, in this order: an exact `host:port`, then a `*.` prefix that
+//! matches at any depth below a domain but never the domain itself.
 //!
-//! One consequence worth stating, because it is the opposite of the TLS
-//! wildcard rule people expect: `*.example.com` matches at any depth
-//! (`a.b.example.com`), but it does **not** match the apex `example.com`. A
-//! wildcard should never quietly widen to the bare domain.
+//! The apex exclusion is the part worth reviewing. An operator who writes
+//! `*.openai.com` has named the subdomains, not the site, and a matcher that
+//! quietly includes the apex grants reach nobody asked for. The rule is also
+//! the one a reader is most likely to "fix" without realising it is load
+//! bearing, so it is asserted directly in the tests below.
 
 /// A parsed allowlist. Empty means the sandbox may reach nothing.
 #[derive(Debug, Clone, Default)]
@@ -129,8 +127,9 @@ mod tests {
 
     #[test]
     fn wildcard_does_not_match_the_apex() {
-        // The property lifted from wl-proxy: "*." never widens to the bare
-        // domain. Getting this wrong would silently admit openai.com itself.
+        // "*." must never widen to the bare domain. Getting this wrong would
+        // silently admit openai.com itself to anyone who allowed only its
+        // subdomains.
         assert!(!list().permits("openai.com", 443).allowed);
     }
 

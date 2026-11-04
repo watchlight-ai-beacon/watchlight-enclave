@@ -13,7 +13,10 @@ mcp:
   servers: []
 
 egress:
-  allow: []
+  # The sandbox may reach exactly this, through the guard. Everything else is
+  # refused and recorded.
+  allow:
+    - example.com:443
 
 limits:
   memory: 1Gi

@@ -4,8 +4,8 @@
 //! mid-run must still leave behind what it tried, and a buffer would lose
 //! exactly the attempts most worth having.
 //!
-//! Two limits are deliberate, and both are borrowed from `wl-proxy`'s
-//! `connect_gate.rs`, which learned them the hard way:
+//! Two limits are deliberate, and both exist because the thing being recorded
+//! is controlled by the party under scrutiny:
 //!
 //! * **Rate limiting.** An agent in a retry loop can emit thousands of
 //!   identical refusals a second. Unbounded, that floods the evidence file and
@@ -146,7 +146,10 @@ fn iso8601_now() -> String {
     let tod = secs.rem_euclid(86_400);
     let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
 
-    // Civil-from-days (Howard Hinnant's algorithm).
+    // Civil-from-days, Howard Hinnant's algorithm. Hand-rolled to keep the
+    // dependency tree at two crates: everything linked into this process is
+    // in the path of the agent's traffic, and a date library is a poor trade
+    // for twenty lines a reviewer can check against the published algorithm.
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

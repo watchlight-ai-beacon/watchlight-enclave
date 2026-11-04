@@ -21,6 +21,7 @@ from typing import Optional
 
 from . import __version__, config, evidence, runs
 from .drivers import DriverError, Mount, SandboxSpec, get_driver
+from .egress import Allowlist, GuardError, get_guard
 
 CONFIG_NAME = "enclave.yaml"
 
@@ -139,7 +140,18 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     _say(f"policy    OK   {len(policies)} file(s) in {cfg.policy.name}/")
 
     if cfg.egress_allow:
-        _say(f"egress    OK   {len(cfg.egress_allow)} host(s) allowed")
+        try:
+            Allowlist(cfg.egress_allow)
+            guard_problems = get_guard("local").preflight()
+        except GuardError as exc:
+            guard_problems = [str(exc)]
+        if guard_problems:
+            ok = False
+            _say(f"egress    FAIL {len(cfg.egress_allow)} host(s) allowed")
+            for problem in guard_problems:
+                print(f"                 - {problem}")
+        else:
+            _say(f"egress    OK   {len(cfg.egress_allow)} host(s) allowed, guard ready")
     else:
         _say("egress    OK   none allowed (the sandbox gets no network)")
 
@@ -167,7 +179,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             problems[1] if len(problems) > 1 else "run `wl-enclave doctor`",
         )
 
-    # Resolve the image, building one if enclave.yaml asks for a build.
+    # Built before the run opens rather than inside it: a build failure is a
+    # configuration problem, and recording it as part of a run would put a
+    # pre-run error in a chain that is supposed to describe an agent.
     image = cfg.agent.image
     if cfg.agent.build:
         dockerfile = cfg.root / cfg.agent.build
@@ -203,11 +217,46 @@ def _cmd_run(args: argparse.Namespace) -> int:
         },
     )
 
+    # Bring the egress guard up before the sandbox, so the sandbox has
+    # somewhere to send traffic the moment it starts.
+    guard = None
+    egress_env: dict[str, str] = {}
+    sandbox_network = "none"
+    if cfg.egress_allow:
+        try:
+            guard = get_guard("local")
+            problems = guard.preflight()
+            if problems:
+                return _fail(f"the egress guard is not ready: {problems[0]}")
+            _say(f"egress guard: building or starting ({len(cfg.egress_allow)} rule(s))")
+            endpoint = guard.start(run.id, Allowlist(cfg.egress_allow), run.egress_file)
+            egress_env = endpoint.env
+            sandbox_network = guard.network() or "none"
+            chain.append(
+                "egress.guard_started",
+                {
+                    "guard": guard.name,
+                    "endpoint": f"{endpoint.host}:{endpoint.port}",
+                    "network": sandbox_network,
+                    "allow": list(cfg.egress_allow),
+                },
+            )
+            _say(f"egress guard: {endpoint.host}:{endpoint.port} on {sandbox_network}")
+        except GuardError as exc:
+            if guard is not None:
+                guard.stop()
+            # Fail rather than fall back to an open network: a run that was
+            # asked to mediate egress and silently did not is worse than no run.
+            chain.append("run.error", {"error": f"egress guard: {exc}"})
+            chain.seal({"run": run.id, "agent": cfg.agent.name, "runtime": cfg.runtime})
+            return _fail(f"egress guard: {exc}")
+
     spec = SandboxSpec(
         name=f"wl-enclave-{run.id}",
         image=image,
         command=cfg.agent.command,
         env={
+            **egress_env,
             # Watchlight writes its decision trail here; the bind mount below
             # is what carries it back out to the host.
             "WATCHLIGHT_AUDIT_DIR": AUDIT_DIR_IN_SANDBOX,
@@ -221,19 +270,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
             Mount(source=cfg.policy, target="/policy", read_only=True),
             Mount(source=run.evidence_dir, target=AUDIT_DIR_IN_SANDBOX, read_only=False),
         ],
-        # No allowlisting proxy in this build, so an egress allowlist cannot be
-        # honoured. Refuse rather than silently granting a full network.
-        network="none",
+        # Either an internal network whose only way out is the guard, or no
+        # network at all. Never a default bridge.
+        network=sandbox_network,
         memory_bytes=cfg.limits.memory_bytes,
         cpus=cfg.limits.cpus,
         pids=cfg.limits.pids,
     )
-
-    if cfg.egress_allow:
-        _say(
-            "note: egress.allow needs an allowlisting proxy, which this build "
-            "does not have yet — the sandbox gets no network"
-        )
 
     sandbox = None
     try:
@@ -251,6 +294,22 @@ def _cmd_run(args: argparse.Namespace) -> int:
             f"read-only-root={c['read_only_root']}  caps-dropped={','.join(c['cap_drop']) or 'none'}"
         )
 
+        # Attested after the sandbox exists, because the fact being checked is
+        # about the two of them together: that the sandbox's only attachment is
+        # the network whose only exit is the guard. Neither half can establish
+        # that alone.
+        if guard is not None:
+            egress_attestation = guard.attest(sandbox.id)
+            chain.append("egress.attested", egress_attestation)
+            if egress_attestation["route_exclusive"]:
+                _say("egress     attested: the guard was the only route")
+            else:
+                # Loud, and in the bundle. An incomplete record that looks
+                # complete is the failure this whole mechanism exists to stop.
+                _say("egress     WARNING: could not attest the guard as the only route")
+                for problem in egress_attestation["problems"]:
+                    print(f"                 - {problem}")
+
         status = driver.wait(sandbox, cfg.limits.timeout_seconds)
         timed_out = status is None
         if timed_out:
@@ -264,6 +323,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
         for record in decisions:
             chain.append("decision", record)
 
+        # The guard's records go in alongside the decisions. The two layers
+        # answer different questions, and a bundle is worth having because it
+        # holds both: Watchlight says what authority the agent had, the guard
+        # says where it actually tried to go.
+        egress = []
+        if guard is not None:
+            from .egress.local import read_egress_records
+
+            egress = read_egress_records(run.egress_file)
+            for record in egress:
+                chain.append(record.get("event", "egress.attempt"), record)
+        egress_allowed = sum(1 for e in egress if e.get("verdict") == "allow")
+        egress_denied = sum(1 for e in egress if e.get("verdict") == "deny")
+
         allows = sum(1 for d in decisions if d.get("decision") == "Allow")
         denies = sum(1 for d in decisions if d.get("decision") == "Deny")
         holds = sum(1 for d in decisions if d.get("decision") == "NeedsApproval")
@@ -275,6 +348,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "timed_out": timed_out,
                 "decisions": len(decisions),
                 "allow": allows, "deny": denies, "needs_approval": holds,
+                "egress_attempts": len(egress),
+                "egress_allowed": egress_allowed,
+                "egress_denied": egress_denied,
             },
         )
         chain.seal(
@@ -289,6 +365,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
         print()
         _say(f"decisions: {allows} allow, {denies} deny" + (f", {holds} held" if holds else ""))
+        if guard is not None:
+            _say(f"egress:    {egress_allowed} allow, {egress_denied} deny")
         _say(f"exit {status if status is not None else 'killed (timeout)'}")
         _say(f"bundle   {run.bundle_dir}")
         _say(f"verify   wl-enclave verify {run.bundle_dir}")
@@ -305,8 +383,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         chain.seal({"run": run.id, "agent": cfg.agent.name, "runtime": cfg.runtime})
         return _fail(str(exc))
     finally:
+        # The sandbox goes first: while it is alive it can still reach the
+        # guard, and removing the guard's network under a live container
+        # leaves docker holding an endpoint it cannot clean up.
         if sandbox is not None and not args.keep:
             driver.teardown(sandbox)
+        if guard is not None and not args.keep:
+            guard.stop()
 
 
 # -------------------------------------------------------------- lifecycle ---
@@ -386,7 +469,18 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     _say(f"head     {result.head[:16]}…")
     for problem in result.problems:
         print(f"            - {problem}")
+    if result.egress_attested is True:
+        _say("egress   attested: the guard was the sandbox's only route")
+        covers = ", ".join(result.egress_covers or []) or "unstated"
+        _say(f"         records cover {covers} only; other traffic was blocked, not recorded")
+    elif result.egress_attested is False:
+        _say("egress   NOT attested: the sandbox may have had another route")
     _say(result.summary)
+    if result.egress_attested is False:
+        _say(
+            "note: egress records are a lower bound for this run — anything "
+            "sent by another route is not in this bundle"
+        )
     if result.ok and not result.signed:
         _say(
             "note: the chain is internally consistent but unsigned, so it "

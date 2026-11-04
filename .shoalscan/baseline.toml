@@ -19,3 +19,19 @@ path = "src/wl_enclave/drivers/docker.py"
 fingerprint = "29e09c72b68e0b9e3d7563327be66eb1:0"
 issue = "#1"
 reason = "Audit-class rule: dangerous-subprocess-use-audit fires on any non-static subprocess argv and cannot see the mitigation. Calls use the list form with shell=False (no shell, no shell injection) and the binary is constrained to docker/podman by get_driver(). The real risk was argument injection, since docker run parses flags up to the image; it is mitigated by config._valid_image_ref() and DockerDriver._reject_flaglike(), both tested. Full review in #1."
+
+[[finding]]
+tool = "opengrep"
+rule = "community.python.lang.security.audit.dangerous-subprocess-use-audit"
+path = "src/wl_enclave/egress/local.py"
+fingerprint = "a187ece58650fc51456a08901a18975b:0"
+issue = "#1"
+reason = "Audit-class rule: fires on any non-static subprocess argv and cannot see the mitigation. The list form is used with shell=False, so there is no shell to inject into. Every argv element is either a literal in this module, an internally generated run id, or a constant image tag; the network and container names are additionally refused by LocalEgressGuard._reject_flaglike() if they could be read as a flag, the same defence the Docker driver applies, because docker run parses flags up to the image and an injected --network=host would dissolve the boundary the guard exists to enforce. The one caller-supplied value, egress.allow, is validated to host:port by config.load() and is passed inside a single WL_EGRESS_ALLOW=... element that cannot begin with a dash; a malformed allowlist makes the guard refuse to start, which fails closed. Full review in #1."
+
+[[finding]]
+tool = "opengrep"
+rule = "community.python.lang.security.audit.dynamic-urllib-use-detected"
+path = "examples/coder/agent.py"
+fingerprint = "b88d027abd3d7c235b58419a48c5710f:0"
+issue = "#1"
+reason = "Audit-class rule: fires on any non-literal urlopen argument. The concern it names is real and is mitigated rather than dismissed: urlopen also honours file://, which reads a local path without touching the network, so the egress guard would never see it and no egress.attempt record would exist. fetch() therefore rejects any URL that is not https:// before calling urlopen, and the docstring says why so the restriction survives being copied. The two call sites pass literals. Full review in #1."

@@ -6,24 +6,14 @@ leaves no trace, and the agent's own failed ``connect()`` is not testimony
 anyone should accept about itself. Closing that gap needs something in the path.
 
 :class:`EgressGuard` is that seam, and it owns the record schema rather than
-delegating it. Two implementations are planned, and they must be
-indistinguishable in the evidence bundle:
+delegating it. Keeping the schema here means a guard can be replaced without
+changing what a bundle looks like, so a verifier written against one guard
+still reads a bundle produced by another.
 
-``LocalEgressGuard``
-    Ships here, in the open-source lane. A CONNECT proxy with an allowlist.
-    No TLS interception and no credential injection — deliberately small, so
-    there is almost nothing that can drift from the other implementation.
-
-``wl-proxy`` (reduced profile)
-    The governed lane, when a control plane exists. Adds credential injection
-    so a key never enters the sandbox, and TLS inspection. It is **not** usable
-    here as it stands: ``apdp_endpoint`` and ``wsb_endpoint`` are required
-    rather than optional, and NATS, KMS and vault PKI are compiled in
-    unconditionally, so it cannot run without the fleet behind it.
-
-A bundle produced on a laptop and one produced by a governed fleet are
-therefore the same artifact at different strengths, which is the property that
-makes the local lane worth having at all.
+:class:`LocalEgressGuard` is the implementation that ships: a CONNECT proxy
+with an allowlist, no TLS interception and no credential injection. It is
+deliberately small, because everything it does is in the path of the agent's
+traffic.
 """
 
 from __future__ import annotations
@@ -35,6 +25,7 @@ from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
 __all__ = [
+    "EGRESS_ATTESTED",
     "EGRESS_RECORD",
     "Allowlist",
     "EgressEndpoint",
@@ -42,6 +33,10 @@ __all__ = [
     "GuardError",
     "get_guard",
 ]
+
+#: The record type a guard writes once per run, stating whether the runtime
+#: confirms it was the sandbox's only route.
+EGRESS_ATTESTED = "egress.attested"
 
 #: The record type every guard appends to the evidence chain. One per attempt.
 #:
@@ -146,26 +141,33 @@ class EgressGuard(Protocol):
         """
         ...
 
+    def attest(self, sandbox_ref: Optional[str] = None) -> dict:
+        """Report the topology **as the runtime reports it**.
+
+        The allowlist and the records are only worth as much as the claim that
+        the guard was the sandbox's one way out. Everything else here asserts
+        that claim; this method is the only thing that checks it, by reading
+        the network layout back out of the runtime instead of trusting what we
+        asked for.
+
+        ``route_exclusive`` is the finding that matters. When it is false the
+        sandbox had some other path to the network, so proxy environment
+        variables were advice the agent was free to ignore and the records are
+        a lower bound on what it attempted, not an account of it. A bundle that
+        is quietly incomplete is worse than one that admits the gap, so this is
+        recorded either way and never inferred from configuration.
+        """
+        ...
+
     def stop(self) -> None:
         """Tear the guard down, leaving its records in place."""
         ...
 
 
 def get_guard(name: str = "local") -> EgressGuard:
-    """Return a guard by name.
-
-    Raises :class:`GuardError` for the reduced ``wl-proxy`` profile, which is
-    planned but not buildable yet (see the module docstring).
-    """
+    """Return a guard by name."""
     if name == "local":
         from .local import LocalEgressGuard
 
         return LocalEgressGuard()
-    if name in ("wl-proxy", "proxy"):
-        raise GuardError(
-            "the wl-proxy guard needs a reduced wl-proxy profile, which does "
-            "not exist yet: apdp_endpoint and wsb_endpoint are required rather "
-            "than optional, and NATS, KMS and vault PKI are compiled in "
-            "unconditionally. Use the local guard."
-        )
     raise GuardError(f"no egress guard named {name!r} (have: local)")

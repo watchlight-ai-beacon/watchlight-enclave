@@ -1,9 +1,10 @@
 """``enclave.yaml`` — the whole configuration surface, deliberately small.
 
 One file names the agent, the runtime to isolate it with, the policy bundle that
-governs it, and what it may reach. The ``policy`` bundle feeds **both** layers:
-Cedar governs authority, and the same bundle compiles to the sandbox's egress
-rules, so the two cannot drift apart.
+governs what authority it has, and under ``egress.allow`` the hosts it may
+reach. Those are two separate questions and the file keeps them separate:
+authority over a tool is not the same thing as reachability of a host, and
+collapsing them would mean one could not be tightened without the other.
 """
 
 from __future__ import annotations
@@ -93,7 +94,6 @@ class Agent:
     command: list[str]
     image: Optional[str] = None
     build: Optional[str] = None
-    requirements: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -183,7 +183,6 @@ def load(path: Path) -> Config:
             command=list(command),
             image=image if isinstance(image, str) else None,
             build=build if isinstance(build, str) else None,
-            requirements=agent_raw.get("requirements"),
         )
 
     # --- runtime -----------------------------------------------------------
@@ -210,6 +209,9 @@ def load(path: Path) -> Config:
     if not isinstance(mcp_raw, dict):
         problems.append("mcp: must be a mapping")
         mcp_raw = {}
+    # Accepted and validated, but nothing in the run path consumes it yet, so
+    # `init` does not write it. Kept here so a file that already names servers
+    # keeps loading rather than failing on an unknown key.
     servers = _require_str_list(mcp_raw.get("servers"), "mcp.servers", problems)
 
     # --- egress ------------------------------------------------------------
@@ -278,18 +280,14 @@ agent:
   command: ["python", "agent.py"]
   image: python:3.12-slim
   # build: ./Dockerfile        # ...or build an image instead of pulling one
-  # requirements: requirements.txt
 
-runtime: docker                # docker | podman | openshell
+runtime: docker                # docker | podman
 
-policy: ./policies             # *.policy.json bundle; feeds BOTH layers
-
-mcp:
-  servers: []                  # MCP servers to intercept, by name
+policy: ./policies             # *.policy.json bundle: what authority the agent has
 
 egress:
   allow: []                    # host:port the sandbox may reach; all else refused
-  # - api.anthropic.com:443
+  # - api.anthropic.com:443    # empty means no network at all
 
 limits:
   memory: 2Gi

@@ -1,12 +1,10 @@
-"""The Docker driver — the default lane, because it is already installed.
+"""The Docker driver, which also serves ``runtime: podman``.
 
-Docker ships first for one reason: *time to a governed run*. A developer who
-has to install a gateway, mint mTLS certificates and edit a TOML file before
-anything runs will not get to the point. ``docker`` is on the machine already,
-so ``wl-enclave run`` works in minutes.
-
-This driver also serves ``runtime: podman``, since the podman CLI is
-argument-compatible for everything used here.
+One implementation covers both because the podman CLI is argument-compatible
+for every invocation used here. If that stops being true, the divergence
+belongs in a separate driver rather than in branches through this one: a
+sandbox boundary that behaves differently depending on which binary is
+installed is one nobody can review.
 
 What it enforces, and what that proves
 --------------------------------------
@@ -127,13 +125,19 @@ class DockerDriver:
             "run",
             "--detach",
             "--name", spec.name,
-            # isolation
+            # The boundary. Each of these is read back out of the runtime by
+            # attest() and written into the evidence chain, so removing one
+            # here silently weakens what a bundle claims. --tmpfs exists
+            # because a read-only root breaks most programs otherwise, and it
+            # is mounted noexec so it cannot become a staging area for code
+            # the image never shipped.
             "--network", spec.network,
             "--read-only",
             "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
-            # ceilings
+            # Ceilings, not security boundaries. They bound the damage a
+            # runaway agent does to the host it shares with everything else.
             "--pids-limit", str(spec.pids),
             "--memory", str(spec.memory_bytes),
             "--cpus", str(spec.cpus),

@@ -308,7 +308,7 @@ async fn serve(
 async fn tunnel(
     guard: Arc<Guard>,
     mut client: TcpStream,
-    mut upstream: TcpStream,
+    upstream: TcpStream,
     host: &str,
     port: u16,
 ) -> std::io::Result<()> {
@@ -317,17 +317,39 @@ async fn tunnel(
         .await?;
 
     let started = Instant::now();
-    let copied = timeout(
-        TUNNEL_MAX_LIFETIME,
-        tokio::io::copy_bidirectional(&mut client, &mut upstream),
-    )
-    .await;
 
-    let (sent, received, outcome) = match copied {
-        Ok(Ok((up, down))) => (up, down, "closed"),
-        Ok(Err(_)) => (0, 0, "error"),
-        Err(_) => (0, 0, "lifetime_exceeded"),
+    // Counted per direction rather than with `copy_bidirectional`, which
+    // returns its totals only on success. A TLS client that closes abruptly —
+    // the ordinary case, not the exceptional one — makes that an error, and the
+    // byte counts would be reported as zero for a tunnel that carried traffic.
+    // Volume is the first question after a suspected exfiltration, so it has to
+    // survive an untidy close.
+    let sent = Arc::new(AtomicU64::new(0));
+    let received = Arc::new(AtomicU64::new(0));
+
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut upstream_read, mut upstream_write) = upstream.into_split();
+
+    let up = pump(&mut client_read, &mut upstream_write, sent.clone());
+    let down = pump(&mut upstream_read, &mut client_write, received.clone());
+
+    let outcome = match timeout(TUNNEL_MAX_LIFETIME, async {
+        // Either direction finishing ends the tunnel: once one side is done the
+        // other has nobody to talk to.
+        tokio::select! {
+            r = up => r,
+            r = down => r,
+        }
+    })
+    .await
+    {
+        Ok(Ok(())) => "closed",
+        Ok(Err(_)) => "error",
+        Err(_) => "lifetime_exceeded",
     };
+
+    let sent = sent.load(Ordering::Relaxed);
+    let received = received.load(Ordering::Relaxed);
 
     guard.recorder.tunnel(
         host,
@@ -338,6 +360,32 @@ async fn tunnel(
         outcome,
     );
     Ok(())
+}
+
+/// Copy one direction of a tunnel, counting bytes as they pass.
+///
+/// The counter is updated before the write, so a byte that was read from the
+/// sandbox is counted even if delivering it upstream then fails. For evidence,
+/// what the agent managed to send is the interesting quantity.
+async fn pump<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    counter: Arc<AtomicU64>,
+) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            let _ = writer.shutdown().await;
+            return Ok(());
+        }
+        counter.fetch_add(n as u64, Ordering::Relaxed);
+        writer.write_all(&buf[..n]).await?;
+    }
 }
 
 /// Read until the end of the request head, bounded in both size and shape.

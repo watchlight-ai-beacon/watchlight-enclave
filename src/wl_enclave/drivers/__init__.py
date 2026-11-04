@@ -1,9 +1,9 @@
 """Runtime drivers — one isolation boundary behind one protocol.
 
 :class:`RuntimeDriver` is the whole seam between Enclave and whatever isolates
-the agent. Docker ships first because it is already on the developer's machine;
-Podman and NVIDIA OpenShell follow behind the same protocol. A new sandbox needs
-one module here and nothing else.
+the agent. Supporting a new isolation runtime means adding one module here and
+nothing else; if a change is needed anywhere outside this package, the seam is
+in the wrong place.
 
 The protocol deliberately includes :meth:`RuntimeDriver.attest`. A driver must
 be able to report, *reading back from the runtime rather than from our own
@@ -115,8 +115,8 @@ class RuntimeDriver(Protocol):
 def get_driver(name: str) -> RuntimeDriver:
     """Return the driver named under ``runtime:``.
 
-    Raises :class:`DriverError` naming what is available when the driver is
-    unknown, or known but not built yet.
+    Raises :class:`DriverError` naming what is available, so a typo in
+    ``runtime:`` is self-correcting.
     """
     if name in ("docker", "podman"):
         from .docker import DockerDriver
@@ -124,6 +124,6 @@ def get_driver(name: str) -> RuntimeDriver:
         return DockerDriver(binary=name)
     if name == "openshell":
         raise DriverError(
-            "the openshell driver is not in this build yet; use runtime: docker"
+            "the openshell driver is not available in this build; use runtime: docker"
         )
     raise DriverError(f"no driver named {name!r} (have: docker, podman)")
