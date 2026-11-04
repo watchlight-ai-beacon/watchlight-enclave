@@ -96,11 +96,15 @@ fn check_v4(ip: Ipv4Addr) -> Result<(), Refusal> {
 }
 
 fn check_v6(ip: Ipv6Addr) -> Result<(), Refusal> {
+    let segments = ip.segments();
     // An IPv4-mapped address must be judged by its IPv4 rules, or ::ffff:127.0.0.1
     // walks straight past every check below.
     if let Some(v4) = ip.to_ipv4_mapped() {
         return check_v4(v4);
     }
+    // Decided before the embedded-IPv4 branches below, because `::1` is also
+    // six zero segments and must be judged as loopback rather than as the
+    // IPv4-compatible address `::0.0.0.1`.
     if ip.is_loopback() {
         return Err(Refusal::Loopback);
     }
@@ -110,7 +114,28 @@ fn check_v6(ip: Ipv6Addr) -> Result<(), Refusal> {
     if ip.is_multicast() {
         return Err(Refusal::Multicast);
     }
-    let segments = ip.segments();
+
+    // Two more ways to carry an IPv4 address inside an IPv6 one, both of which
+    // reach the v4 world through a translator and neither of which
+    // `to_ipv4_mapped` recognises:
+    //
+    //   * NAT64 `64:ff9b::/96` — the well-known prefix. `64:ff9b::7f00:1`
+    //     is 127.0.0.1 on the other side of any NAT64 gateway.
+    //   * IPv4-compatible `::/96`, deprecated but still routed by some stacks.
+    //     `::127.0.0.1` is not caught by `is_loopback`, which is only `::1`.
+    //
+    // Judged by the v4 rules, because that is where the packet ends up.
+    let v4_compatible = segments[0..6] == [0, 0, 0, 0, 0, 0] && !ip.is_unspecified();
+    let nat64 = segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..5] == [0, 0, 0];
+    if v4_compatible || nat64 {
+        let embedded = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            (segments[6] & 0xff) as u8,
+            (segments[7] >> 8) as u8,
+            (segments[7] & 0xff) as u8,
+        );
+        return check_v4(embedded);
+    }
     if segments[0] & 0xffc0 == 0xfe80 {
         return Err(Refusal::LinkLocal);
     }
@@ -123,6 +148,15 @@ fn check_v6(ip: Ipv6Addr) -> Result<(), Refusal> {
         return Err(Refusal::Reserved);
     }
     if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+        return Err(Refusal::Reserved);
+    }
+    if segments[0] & 0xffc0 == 0xfec0 {
+        return Err(Refusal::Private); // fec0::/10, deprecated site-local
+    }
+    // Default-deny anything outside global unicast. An agent's destination is
+    // a public host; every other prefix is either infrastructure or a way of
+    // naming one, and new ones get assigned faster than this file is revisited.
+    if segments[0] & 0xe000 != 0x2000 {
         return Err(Refusal::Reserved);
     }
     Ok(())
@@ -166,6 +200,39 @@ mod tests {
         // ::ffff:127.0.0.1 is the classic way past a v4-only check.
         assert_eq!(refused("::ffff:127.0.0.1"), Refusal::Loopback);
         assert_eq!(refused("::ffff:169.254.169.254"), Refusal::CloudMetadata);
+    }
+
+    #[test]
+    fn an_ipv4_address_tunnelled_inside_ipv6_is_judged_by_its_v4_rules() {
+        // Each of these reaches the v4 world through a translator, so the
+        // address that matters is the embedded one.
+        assert_eq!(refused("64:ff9b::7f00:1"), Refusal::Loopback); // NAT64 127.0.0.1
+        assert_eq!(refused("64:ff9b::a9fe:a9fe"), Refusal::CloudMetadata); // 169.254.169.254
+        assert_eq!(refused("64:ff9b::c0a8:1"), Refusal::Private); // 192.168.0.1
+        assert_eq!(refused("::127.0.0.1"), Refusal::Loopback); // IPv4-compatible
+        assert_eq!(refused("::169.254.169.254"), Refusal::CloudMetadata);
+    }
+
+    #[test]
+    fn loopback_wins_over_the_embedded_ipv4_reading() {
+        // ::1 is also six zero segments, so it would otherwise be read as the
+        // IPv4-compatible address ::0.0.0.1 and allowed.
+        assert_eq!(refused("::1"), Refusal::Loopback);
+        assert_eq!(refused("::"), Refusal::Unspecified);
+    }
+
+    #[test]
+    fn anything_outside_global_unicast_is_refused_by_default() {
+        // New non-global prefixes get assigned faster than this file is
+        // revisited, so the default is deny rather than allow.
+        assert_eq!(refused("fec0::1"), Refusal::Private); // deprecated site-local
+        assert_eq!(refused("100::1"), Refusal::Reserved); // discard-only
+        // Note 3ffe::/16 (the former 6bone) is NOT caught here: it sits inside
+        // 2000::/3, so a default-deny on non-global-unicast does not reach it.
+        // Left alone rather than special-cased — the prefix is unassigned, not
+        // infrastructure, so it is not a path to anything.
+        // ...and a genuine public address still passes.
+        assert!(check("2606:4700:4700::1111".parse().unwrap()).is_ok());
     }
 
     #[test]
