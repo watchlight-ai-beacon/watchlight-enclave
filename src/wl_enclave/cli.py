@@ -329,7 +329,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
         run.log_file.write_text(driver.logs(sandbox))
 
-        decisions = runs.read_decisions(run.audit_file)
+        decisions, decision_account = runs.read_decisions(run.audit_file)
+        # The agent authored these, so what was refused on the way in is part
+        # of the record. A malformed line is not interesting on its own; a
+        # thousand of them, or a truncated field, says something about the run.
+        if any(decision_account.values()):
+            chain.append("decision.ingest", decision_account)
         for record in decisions:
             chain.append("decision", record)
 
@@ -419,6 +424,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "egress_records_dropped": records_dropped,
                 "egress_unrecognised": egress_unrecognised,
                 "egress_guard_stopped_early": guard_stopped_early,
+                "decisions_malformed": decision_account["malformed"],
+                "decisions_over_cap": decision_account["dropped_over_cap"],
                 "egress_allowed": egress_allowed,
                 "egress_denied": egress_denied,
             },

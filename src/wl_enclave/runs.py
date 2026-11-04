@@ -129,14 +129,60 @@ def find_run(root: Path, run_id: str) -> Optional[Run]:
     return prefixed[0] if len(prefixed) == 1 else None
 
 
-def read_decisions(audit_file: Path) -> list[dict]:
-    """Parse Watchlight's audit trail into decision records.
+#: Most decision records taken from one run's audit trail. The file is written
+#: by the agent's own process, so without a cap a loop can make the chain
+#: arbitrarily long and bury the records a reviewer came for.
+MAX_DECISIONS = 10_000
+
+#: Longest string kept from any field of an agent-authored record.
+MAX_FIELD_CHARS = 512
+
+#: Fields a decision must carry to be read as one.
+_REQUIRED_DECISION_FIELDS = ("decision", "intent", "resource", "ts")
+
+#: What the agent is allowed to say about itself, and nothing more. Any other
+#: key is dropped rather than carried: an unknown field in an agent-authored
+#: record is something a reader might believe.
+_ALLOWED_DECISION_FIELDS = frozenset(
+    {"agent", "decision", "decision_id", "event", "intent", "principal", "resource", "ts"}
+)
+
+
+def _scrub(value: Any) -> Any:
+    """Make one agent-supplied value safe to put in front of a reviewer.
+
+    Control characters are stripped because the chain is line-delimited JSON
+    and a newline inside a value is how a single record becomes two. Length is
+    capped because an unbounded field is an unbounded chain.
+    """
+    if isinstance(value, str):
+        cleaned = "".join(ch for ch in value if ch.isprintable())
+        if len(cleaned) > MAX_FIELD_CHARS:
+            return cleaned[:MAX_FIELD_CHARS] + "…[truncated]"
+        return cleaned
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _scrub(str(value))
+
+
+def read_decisions(audit_file: Path) -> tuple[list[dict], dict]:
+    """Parse Watchlight's audit trail, returning the records and an account.
+
+    These are the only chain payloads the agent's own process authors: the
+    audit file lives in the directory shared with the sandbox, by design,
+    because the SDK inside it is what writes the decisions. Everything here
+    follows from that. The records are not trusted as given — they are
+    bounded, scrubbed, reduced to known fields, and stamped at this boundary
+    with where they came from, overwriting anything the record claimed on that
+    subject. A reviewer must never have to guess which records the subject of
+    the investigation wrote about itself.
 
     Tolerates a truncated final line: a sandbox killed mid-write leaves one,
     and losing the whole trail over it would defeat the point.
     """
+    account = {"malformed": 0, "truncated_fields": 0, "dropped_over_cap": 0}
     if not Path(audit_file).is_file():
-        return []
+        return [], account
     out: list[dict] = []
     with Path(audit_file).open(encoding="utf-8") as fh:
         for line in fh:
@@ -144,7 +190,28 @@ def read_decisions(audit_file: Path) -> list[dict]:
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
+                raw = json.loads(line)
             except json.JSONDecodeError:
+                account["malformed"] += 1
                 continue
-    return out
+            if not isinstance(raw, dict) or any(
+                field not in raw for field in _REQUIRED_DECISION_FIELDS
+            ):
+                account["malformed"] += 1
+                continue
+            if len(out) >= MAX_DECISIONS:
+                account["dropped_over_cap"] += 1
+                continue
+            record = {}
+            for key, value in raw.items():
+                if key not in _ALLOWED_DECISION_FIELDS:
+                    continue
+                scrubbed = _scrub(value)
+                if scrubbed != value:
+                    account["truncated_fields"] += 1
+                record[key] = scrubbed
+            # Stamped last so it overwrites, rather than merges with, whatever
+            # the record said about its own provenance.
+            record["asserted_by"] = "sandbox"
+            out.append(record)
+    return out, account

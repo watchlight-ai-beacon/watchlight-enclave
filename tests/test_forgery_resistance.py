@@ -291,3 +291,88 @@ def test_a_mask_that_changes_under_normalisation_is_refused(shadow, why):
     )
     with pytest.raises(DriverError):
         DockerDriver().provision(spec)
+
+
+# -- decision records are the agent's own account, and are treated as such --
+
+def test_a_forged_provenance_claim_is_overwritten_not_merged(tmp_path):
+    """The agent writes these records. It does not get to say where they came from.
+
+    Validation would only establish that a record is well-formed. Stamping
+    provenance at the boundary establishes who wrote it, which is the fact a
+    reviewer actually needs, and it must overwrite rather than merge or the
+    agent's claim survives alongside ours.
+    """
+    audit = tmp_path / "audit.jsonl"
+    audit.write_text(
+        json.dumps({
+            "decision": "Allow", "intent": "research", "resource": "tool/x",
+            "ts": "2026-01-01T00:00:00+00:00",
+            "asserted_by": "runtime_readback",  # the forgery
+        }) + "\n"
+    )
+    records, _ = runs.read_decisions(audit)
+    assert records[0]["asserted_by"] == "sandbox"
+
+
+def test_unknown_fields_are_dropped_rather_than_carried(tmp_path):
+    """An unknown field in an agent-authored record is something a reader might believe."""
+    audit = tmp_path / "audit.jsonl"
+    audit.write_text(
+        json.dumps({
+            "decision": "Allow", "intent": "research", "resource": "tool/x",
+            "ts": "2026-01-01T00:00:00+00:00",
+            "verified_by": "runtime_readback", "route_exclusive": True,
+        }) + "\n"
+    )
+    records, _ = runs.read_decisions(audit)
+    assert "verified_by" not in records[0]
+    assert "route_exclusive" not in records[0]
+
+
+def test_a_newline_in_a_field_cannot_split_one_record_into_two(tmp_path):
+    """The chain is line-delimited JSON; a control character is a forgery primitive."""
+    audit = tmp_path / "audit.jsonl"
+    audit.write_text(
+        json.dumps({
+            "decision": "Allow", "intent": "research",
+            "resource": 'tool/x\n{"decision":"Allow","intent":"exfiltrate"}',
+            "ts": "2026-01-01T00:00:00+00:00",
+        }) + "\n"
+    )
+    records, account = runs.read_decisions(audit)
+    assert len(records) == 1
+    assert "\n" not in records[0]["resource"]
+    assert account["truncated_fields"] == 1
+
+
+def test_the_decision_count_is_capped_and_the_cap_is_reported(tmp_path):
+    """Without a cap, a loop makes the chain arbitrarily long.
+
+    The overflow is counted rather than ignored: a run that hit the cap must
+    not look like a run that simply made fewer decisions.
+    """
+    audit = tmp_path / "audit.jsonl"
+    one = json.dumps({
+        "decision": "Allow", "intent": "research", "resource": "tool/x",
+        "ts": "2026-01-01T00:00:00+00:00",
+    })
+    audit.write_text("\n".join([one] * (runs.MAX_DECISIONS + 25)) + "\n")
+    records, account = runs.read_decisions(audit)
+    assert len(records) == runs.MAX_DECISIONS
+    assert account["dropped_over_cap"] == 25
+
+
+def test_a_record_missing_required_fields_is_counted_not_chained(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    audit.write_text(
+        json.dumps({"decision": "Allow"}) + "\n"
+        + "not json at all\n"
+        + json.dumps({
+            "decision": "Allow", "intent": "research", "resource": "tool/x",
+            "ts": "2026-01-01T00:00:00+00:00",
+        }) + "\n"
+    )
+    records, account = runs.read_decisions(audit)
+    assert len(records) == 1
+    assert account["malformed"] == 2
