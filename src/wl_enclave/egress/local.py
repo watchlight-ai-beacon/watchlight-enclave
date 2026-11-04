@@ -55,6 +55,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from .. import attestation
 from . import Allowlist, EgressEndpoint, GuardError
 
 #: What a guard of this shape can and cannot put in a record. Carried into the
@@ -356,6 +357,44 @@ class LocalEgressGuard:
             and self._network in guard_nets
             and len(guard_nets) > 1
         )
+
+        # The same conclusion, broken out per control. route_exclusive stays
+        # because it is the one-line answer, but it is a conjunction, and a
+        # conjunction that comes out false does not say which term failed. Each
+        # control also carries how its state was established, because a fact
+        # read out of the runtime and a fact we merely asked for are the same
+        # word in a bundle unless the record distinguishes them.
+        extra_nets = [n for n in (sandbox_nets or []) if n != self._network]
+        facts["controls"] = {
+            attestation.NETWORK_UNROUTABLE: attestation.control(
+                facts["network_internal"],
+                attestation.READBACK,
+                "" if facts["network_internal"] else
+                "the network is not marked internal, so it has a gateway",
+            ),
+            attestation.SANDBOX_SINGLE_NETWORK: attestation.control(
+                (sandbox_nets == [self._network]) if sandbox_nets else None,
+                attestation.READBACK,
+                ("also attached to " + ", ".join(extra_nets)) if extra_nets else "",
+            ),
+            attestation.GUARD_ATTACHED: attestation.control(
+                (self._network in guard_nets) if guard_nets else None,
+                attestation.READBACK,
+            ),
+            attestation.GUARD_HAS_EGRESS: attestation.control(
+                (len(guard_nets) > 1) if guard_nets else None,
+                attestation.READBACK,
+                "" if len(guard_nets) > 1 else
+                "the guard has no second network, so it could not forward",
+            ),
+            attestation.GUARD_LIVE: attestation.control(
+                facts.get("guard_running"),
+                attestation.READBACK,
+                "" if facts.get("guard_running") else
+                f"guard status {facts.get('guard_status')!r}, "
+                f"exit {facts.get('guard_exit_code')}",
+            ),
+        }
         if sandbox_nets and sandbox_nets != [self._network]:
             extra = [n for n in sandbox_nets if n != self._network]
             facts["problems"].append(

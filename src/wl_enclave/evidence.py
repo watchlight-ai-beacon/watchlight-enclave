@@ -50,6 +50,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from . import attestation
+
 __all__ = [
     "GENESIS",
     "CHAIN_FILE",
@@ -253,12 +255,31 @@ class VerifyResult:
     #: Why the bundle is incomplete, in a reviewer's terms. Distinct from
     #: :attr:`problems`, which is reserved for integrity failures.
     incomplete_reasons: list[str] = field(default_factory=list)
+    #: Every named control from every attesting layer, merged. A reviewer
+    #: asking why a bundle is weaker than expected is always asking about one
+    #: of these, which is why they are not collapsed into a boolean.
+    controls: dict = field(default_factory=dict)
+    #: ``False`` when some control was established as not in force. A third
+    #: claim, independent of the two above, because it fails differently: the
+    #: chain can be intact and complete and still faithfully describe a run
+    #: that was not properly contained. Collapsing it into either of the others
+    #: would lose exactly the distinction this bundle exists to make.
+    contained: bool = True
 
     @property
     def verdict(self) -> str:
-        """``ok``, ``incomplete`` or ``failed`` — what a gate should branch on."""
+        """What a gate should branch on: the worst of three separate claims.
+
+        Ordered by what each one costs a reader. A broken chain comes first
+        because nothing else in the bundle can be relied on once it fails. An
+        uncontained run comes next: the record is trustworthy and describes a
+        run whose isolation did not hold. Incomplete comes last — everything
+        stated is true, and some of what happened is missing.
+        """
         if not self.ok:
             return "failed"
+        if not self.contained:
+            return "uncontained"
         return "ok" if self.complete else "incomplete"
 
     @property
@@ -266,6 +287,12 @@ class VerifyResult:
         if not self.ok:
             return f"FAILED — {len(self.problems)} problem(s)"
         note = "signed" if self.signed else "unsigned"
+        if not self.contained:
+            failed = ", ".join(attestation.failed_controls(self.controls))
+            return (
+                f"UNCONTAINED — {self.records} records, chain intact, {note}, "
+                f"but these controls were not in force: {failed}"
+            )
         if not self.complete:
             # The reasons differ — records dropped under a limit, or a guard
             # that stopped witnessing — so the summary counts them rather than
@@ -392,12 +419,47 @@ def verify(bundle_dir: Path) -> VerifyResult:
     # different thing: everything in it is true, and some of what happened is
     # missing. Collapsing the two would make a rate-limited run read exactly
     # like a tampered one, which is how a reviewer learns to ignore both.
+    # Controls from every attesting layer, read out of the records. A control
+    # established as not in force is an integrity-relevant finding — the layer
+    # did not hold — while one that could not be determined is the same kind of
+    # fact as a dropped record: everything stated is true and something is
+    # unknown. The two therefore land on different halves of the verdict.
+    controls: dict[str, dict] = {}
+    for record in records:
+        if record.type in {"sandbox.attested", "egress.attested"}:
+            found = record.data.get("controls")
+            if not isinstance(found, dict):
+                found = (record.data.get("constraints") or {}).get("controls")
+            if isinstance(found, dict):
+                controls = attestation.merge(controls, found)
+        elif record.type == "egress.guard_stopped":
+            # The guard's fate is known only at the end, after the topology
+            # was attested. Folded in as a control so it reaches the same
+            # summary rather than living only in its own record.
+            controls = attestation.merge(
+                controls,
+                {
+                    attestation.GUARD_LIVE: attestation.control(
+                        False,
+                        attestation.READBACK,
+                        f"stopped before the run ended, exit "
+                        f"{record.data.get('guard_exit_code')}",
+                    )
+                },
+            )
+
     incomplete_reasons: list[str] = []
     if suppressions:
         dropped = f"{records_dropped} " if records_dropped else ""
         incomplete_reasons.append(
             f"the guard reports {dropped}record(s) it could not write, so the "
             f"egress records are a lower bound"
+        )
+    for name in attestation.unverified_controls(controls):
+        detail = (controls[name].get("detail") or "").strip()
+        incomplete_reasons.append(
+            f"control {name!r} could not be confirmed"
+            + (f": {detail}" if detail else "")
         )
     if stopped:
         incomplete_reasons.append(
@@ -417,4 +479,6 @@ def verify(bundle_dir: Path) -> VerifyResult:
         complete=not incomplete_reasons,
         records_dropped=records_dropped,
         incomplete_reasons=incomplete_reasons,
+        controls=controls,
+        contained=not attestation.failed_controls(controls),
     )

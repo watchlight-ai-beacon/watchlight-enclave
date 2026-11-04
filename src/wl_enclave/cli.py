@@ -571,6 +571,17 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         _say(f"         records cover {covers} only; other traffic was blocked, not recorded")
     elif result.egress_attested is False:
         _say("egress   NOT attested: the sandbox may have had another route")
+    if result.controls:
+        in_force = sum(
+            1 for c in result.controls.values() if c.get("in_force") is True
+        )
+        _say(f"controls {in_force}/{len(result.controls)} in force")
+        for name, entry in sorted(result.controls.items()):
+            if entry.get("in_force") is True:
+                continue
+            state = "NOT in force" if entry.get("in_force") is False else "unconfirmed"
+            detail = (entry.get("detail") or "").strip()
+            _say(f"         - {name}: {state}" + (f" — {detail}" if detail else ""))
     if not result.complete:
         _say("egress   INCOMPLETE — by the bundle's own account:")
         for reason in result.incomplete_reasons:

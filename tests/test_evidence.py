@@ -169,9 +169,86 @@ def test_a_guard_that_stopped_early_makes_the_bundle_incomplete(tmp_path):
 
     result = evidence.verify(bundle)
     assert result.complete is False
-    assert result.verdict == "incomplete"
     assert any("stopped before the run ended" in r for r in result.incomplete_reasons)
     assert result.problems == [], "a dead guard is not an integrity failure"
+    # The guard-stopped record weakens the guard_live control it had already
+    # attested as true, so the run also reads as uncontained: the witness was
+    # part of the containment, and it left.
+    assert result.contained is False
+    assert result.verdict == "uncontained"
     # Attested and complete are different claims: the topology really was
     # exclusive, and the records are still an understatement.
     assert result.egress_attested is True
+
+
+# -- controls: named, merged weakest-first, and a third kind of verdict ----
+
+def test_a_control_not_in_force_reads_uncontained_not_failed(tmp_path):
+    """Three claims, not two.
+
+    A chain can be intact and complete and still faithfully describe a run
+    whose isolation did not hold. Reporting that as FAILED would say the
+    evidence is untrustworthy, which is the opposite of the truth: the evidence
+    is trustworthy and it says something bad.
+    """
+    bundle = tmp_path / "bundle"
+    chain = evidence.ChainWriter(bundle)
+    chain.append("run.open", {"purpose": "t"})
+    chain.append("sandbox.attested", {"controls": {
+        "rootfs_read_only": {"in_force": False, "verified_by": "runtime_config_readback",
+                             "detail": "the root filesystem was writable"},
+        "capabilities_dropped": {"in_force": True, "verified_by": "runtime_config_readback"},
+    }})
+    chain.append("run.close", {"exit_code": 0})
+    chain.seal({"agent": "t"})
+
+    result = evidence.verify(bundle)
+    assert result.ok is True, "the chain is intact"
+    assert result.complete is True, "nothing is missing"
+    assert result.contained is False
+    assert result.verdict == "uncontained"
+    assert "UNCONTAINED" in result.summary
+    assert "rootfs_read_only" in result.summary
+
+
+def test_an_unconfirmable_control_reads_incomplete(tmp_path):
+    """Could-not-determine is the same kind of fact as a dropped record."""
+    bundle = tmp_path / "bundle"
+    chain = evidence.ChainWriter(bundle)
+    chain.append("run.open", {"purpose": "t"})
+    chain.append("sandbox.attested", {"controls": {
+        "evidence_masked_from_sandbox": {
+            "in_force": None, "verified_by": "runtime_config_readback",
+            "detail": "no masks were declared for this run",
+        },
+    }})
+    chain.append("run.close", {"exit_code": 0})
+    chain.seal({"agent": "t"})
+
+    result = evidence.verify(bundle)
+    assert (result.ok, result.contained, result.complete) == (True, True, False)
+    assert result.verdict == "incomplete"
+    assert any("could not be confirmed" in r for r in result.incomplete_reasons)
+
+
+def test_a_later_record_can_only_weaken_a_control_never_strengthen_it(tmp_path):
+    """Weakest-wins, so appending records cannot buy a flattering verdict.
+
+    An attacker able to append to the chain can only make the bundle describe
+    a worse run than happened, which is the one direction that does not
+    mislead. Order-independence is the point: the topology is attested when the
+    sandbox is provisioned, and the guard's fate is known only at the end.
+    """
+    from wl_enclave import attestation
+
+    weak = {"c": attestation.control(False, attestation.READBACK)}
+    unknown = {"c": attestation.control(None, attestation.READBACK)}
+    strong = {"c": attestation.control(True, attestation.READBACK)}
+
+    # Whatever order they arrive in, the weakest claim survives.
+    assert attestation.merge(strong, weak)["c"]["in_force"] is False
+    assert attestation.merge(weak, strong)["c"]["in_force"] is False
+    assert attestation.merge(strong, unknown)["c"]["in_force"] is None
+    assert attestation.merge(unknown, strong)["c"]["in_force"] is None
+    assert attestation.merge(unknown, weak)["c"]["in_force"] is False
+    assert attestation.merge(weak, unknown)["c"]["in_force"] is False

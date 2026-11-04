@@ -31,6 +31,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from .. import attestation
 from . import DriverError, Sandbox, SandboxSpec
 
 #: Ceiling on any single docker invocation that is not expected to block.
@@ -41,6 +42,8 @@ class DockerDriver:
     """Provisions sandboxes with the Docker (or Podman) CLI."""
 
     def __init__(self, binary: str = "docker") -> None:
+        #: Masks declared per sandbox, keyed by container id.
+        self._masks: dict[str, list[str]] = {}
         self.name = binary
         self._bin = binary
 
@@ -151,6 +154,7 @@ class DockerDriver:
         # they were given in. The real invariant is nesting — a mask must be
         # strictly below a mount target, or it collides with it instead of
         # covering it — so that is checked rather than assumed.
+        declared_masks: list[str] = []
         mount_targets = [posixpath.normpath(m.target) for m in spec.mounts]
         for path in spec.shadow:
             self._reject_flaglike("shadow path", path)
@@ -178,6 +182,7 @@ class DockerDriver:
                     f"with a mount instead of covering it"
                 )
             args += ["--tmpfs", f"{normalised}:rw,noexec,nosuid,size=1m"]
+            declared_masks.append(normalised)
 
         for mount in spec.mounts:
             ro = ",readonly" if mount.read_only else ""
@@ -193,6 +198,10 @@ class DockerDriver:
         container_id = proc.stdout.strip()
         if not container_id:
             raise DriverError(f"{self._bin} run returned no container id")
+        # Retained so attest() can assert its own postcondition: that every
+        # mask this driver applied came back. Without it the attestation can
+        # only report what tmpfs mounts exist, which is not the same question.
+        self._masks[container_id] = declared_masks
         return Sandbox(id=container_id, name=spec.name, driver=self.name)
 
     def attest(self, sandbox: Sandbox) -> dict:
@@ -234,15 +243,18 @@ class DockerDriver:
                 "pids_limit": host.get("PidsLimit"),
                 "memory_bytes": host.get("Memory"),
                 "nano_cpus": host.get("NanoCpus"),
-                # Paths covered with an empty filesystem, hiding whatever a
-                # mount would otherwise expose there. Read back because this is
-                # a security control, not a convenience: it is what keeps the
-                # run's own evidence out of reach of the workspace mount, and a
-                # control that does not appear in the attestation is one a
-                # reviewer has to take on trust. Docker reports these under
-                # HostConfig.Tmpfs rather than in Mounts, so they would
-                # otherwise be invisible in a bundle that lists every mount.
-                "masked_paths": sorted((host.get("Tmpfs") or {}).keys()),
+                # Two fields, not one. This used to report every tmpfs key,
+                # which conflated the masks that keep the run's own evidence
+                # out of reach of the workspace mount with the unconditional
+                # /tmp scratch — so the field read ["/tmp", "/work/runs"] and a
+                # reviewer could not tell a security control from a
+                # convenience. Worse, it made the mask invariant unassertable:
+                # "every mask is strictly below a mount target" is false of
+                # /tmp. Docker reports both under HostConfig.Tmpfs rather than
+                # in Mounts, so they are invisible in a bundle that lists only
+                # mounts, which is why they appear here at all.
+                "masked_paths": sorted(self._masks.get(sandbox.id, [])),
+                "tmpfs_paths": sorted((host.get("Tmpfs") or {}).keys()),
             },
             "mounts": [
                 {
@@ -252,6 +264,51 @@ class DockerDriver:
                 }
                 for m in (inspected.get("Mounts") or [])
             ],
+            "controls": self._controls(sandbox, host),
+        }
+
+    def _controls(self, sandbox: Sandbox, host: dict) -> dict:
+        """Each isolation setting named, with how its state was established.
+
+        The constraints block above already lists the settings. This says, for
+        each one, whether it is actually in force — which is a different
+        question, and the only one a reviewer can act on. A setting applied but
+        not read back is indistinguishable, in a bundle, from one that was
+        never applied at all.
+        """
+        tmpfs = set((host.get("Tmpfs") or {}).keys())
+        declared = self._masks.get(sandbox.id, [])
+        missing = [path for path in declared if path not in tmpfs]
+        cap_drop = [c.upper() for c in (host.get("CapDrop") or [])]
+        security_opt = host.get("SecurityOpt") or []
+
+        return {
+            attestation.ROOTFS_READ_ONLY: attestation.control(
+                bool(host.get("ReadonlyRootfs")), attestation.RUNTIME_CONFIG
+            ),
+            attestation.CAPABILITIES_DROPPED: attestation.control(
+                "ALL" in cap_drop and not (host.get("CapAdd") or []),
+                attestation.RUNTIME_CONFIG,
+                ("added back: " + ", ".join(host.get("CapAdd") or []))
+                if host.get("CapAdd") else "",
+            ),
+            attestation.NO_NEW_PRIVILEGES: attestation.control(
+                any("no-new-privileges" in opt for opt in security_opt),
+                attestation.RUNTIME_CONFIG,
+            ),
+            # The driver's postcondition. provision() refuses a mask that is
+            # not strictly below a mount target; this asserts the masks it did
+            # apply came back. Labelled RUNTIME_CONFIG rather than READBACK on
+            # purpose: this is the daemon's record of what was requested, and
+            # the daemon normalises a destination after making it. Confirming
+            # the mask against the container's own mount table is the stronger
+            # claim and is not made here.
+            attestation.EVIDENCE_MASKED: attestation.control(
+                (not missing) if declared else None,
+                attestation.RUNTIME_CONFIG,
+                ("declared but absent: " + ", ".join(missing)) if missing
+                else ("" if declared else "no masks were declared for this run"),
+            ),
         }
 
     def wait(self, sandbox: Sandbox, timeout_seconds: int) -> Optional[int]:
