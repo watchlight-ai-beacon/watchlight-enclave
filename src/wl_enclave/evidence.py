@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -250,6 +250,9 @@ class VerifyResult:
     complete: bool = True
     #: How many records the guard reports dropping, when it says so.
     records_dropped: int = 0
+    #: Why the bundle is incomplete, in a reviewer's terms. Distinct from
+    #: :attr:`problems`, which is reserved for integrity failures.
+    incomplete_reasons: list[str] = field(default_factory=list)
 
     @property
     def verdict(self) -> str:
@@ -264,10 +267,16 @@ class VerifyResult:
             return f"FAILED — {len(self.problems)} problem(s)"
         note = "signed" if self.signed else "unsigned"
         if not self.complete:
-            dropped = f"{self.records_dropped} dropped" if self.records_dropped else "some dropped"
+            # The reasons differ — records dropped under a limit, or a guard
+            # that stopped witnessing — so the summary counts them rather than
+            # naming one. Describing a dead guard as "records it could not
+            # write" was wrong in exactly the direction that matters: it
+            # understated a gap while claiming to report it.
+            count = len(self.incomplete_reasons)
             return (
                 f"INCOMPLETE — {self.records} records, chain intact, {note}, "
-                f"but the guard reports records it could not write ({dropped})"
+                f"but incomplete by its own account ({count} reason"
+                f"{'s' if count != 1 else ''})"
             )
         return f"OK — {self.records} records, chain intact, {note}"
 
@@ -372,6 +381,31 @@ def verify(bundle_dir: Path) -> VerifyResult:
         if isinstance(value, int) and value > records_dropped:
             records_dropped = value
 
+    # A guard that stopped before the run did is the other way the egress
+    # records become a lower bound: not records dropped under a limit, but
+    # records never taken, because nothing was watching. Both make the file an
+    # understatement, so both land on the same verdict.
+    stopped = [r for r in records if r.type == "egress.guard_stopped"]
+
+    # Kept out of `problems` deliberately. A problem is an integrity failure —
+    # a record edited, removed or reordered — and an incomplete bundle is a
+    # different thing: everything in it is true, and some of what happened is
+    # missing. Collapsing the two would make a rate-limited run read exactly
+    # like a tampered one, which is how a reviewer learns to ignore both.
+    incomplete_reasons: list[str] = []
+    if suppressions:
+        dropped = f"{records_dropped} " if records_dropped else ""
+        incomplete_reasons.append(
+            f"the guard reports {dropped}record(s) it could not write, so the "
+            f"egress records are a lower bound"
+        )
+    if stopped:
+        incomplete_reasons.append(
+            f"the egress guard stopped before the run ended "
+            f"(exit {stopped[0].data.get('guard_exit_code')}); attempts made "
+            f"after that are absent rather than denied"
+        )
+
     return VerifyResult(
         ok=not problems,
         records=len(records),
@@ -380,6 +414,7 @@ def verify(bundle_dir: Path) -> VerifyResult:
         signed=False,
         egress_attested=egress_attested,
         egress_covers=egress_covers,
-        complete=not suppressions,
+        complete=not incomplete_reasons,
         records_dropped=records_dropped,
+        incomplete_reasons=incomplete_reasons,
     )

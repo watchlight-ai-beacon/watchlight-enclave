@@ -174,6 +174,12 @@ class LocalEgressGuard:
                 "--security-opt", "no-new-privileges",
                 "--pids-limit", "128",
                 "--memory", str(256 * 1024**2),
+                # The guard writes a line to stderr per failed connection, and
+                # record writes are rate-limited while stderr is not. Without a
+                # cap, a connect-then-reset loop inside the sandbox writes
+                # unbounded host disk through the daemon's logging driver.
+                "--log-opt", "max-size=16m",
+                "--log-opt", "max-file=2",
                 "--mount",
                 f"type=bind,src={record_file.resolve()},dst={RECORD_IN_GUARD}",
                 "--env", f"WL_EGRESS_LISTEN=0.0.0.0:{GUARD_PORT}",
@@ -248,6 +254,36 @@ class LocalEgressGuard:
             + (f": {tail[-1]}" if tail else "")
         )
 
+    def state(self) -> dict:
+        """What the runtime says the guard container is doing right now.
+
+        Read back rather than assumed, for the same reason the topology is: a
+        container that exited still reports both its networks, so a guard that
+        died one second into the run satisfies every attachment check in
+        :meth:`attest` while having witnessed nothing since. ``OOMKilled`` is
+        included because that is the likeliest way for it to die on its own —
+        the memory ceiling is deliberately small.
+        """
+        if not self._container:
+            return {}
+        probe = self._run(
+            "inspect", self._container, "--format",
+            "{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}",
+            check=False, timeout=30,
+        )
+        if probe.returncode != 0:
+            return {"guard_state_unreadable": True}
+        parts = probe.stdout.strip().split("|")
+        if len(parts) != 3:
+            return {"guard_state_unreadable": True}
+        status, exit_code, oom = parts
+        return {
+            "guard_status": status,
+            "guard_running": status == "running",
+            "guard_exit_code": int(exit_code) if exit_code.lstrip("-").isdigit() else None,
+            "guard_oom_killed": oom == "true",
+        }
+
     def attest(self, sandbox_ref: Optional[str] = None) -> dict:
         """Read the network layout back out of Docker.
 
@@ -303,6 +339,14 @@ class LocalEgressGuard:
 
         if self._container:
             facts["guard_networks"] = self._networks_of(self._container, facts, "guard")
+            facts.update(self.state())
+
+        if facts.get("guard_running") is False:
+            facts["problems"].append(
+                f"the guard was not running when the topology was read "
+                f"(exit {facts.get('guard_exit_code')}): anything the sandbox "
+                f"attempted while it was down is absent from the records"
+            )
 
         sandbox_nets = facts["sandbox_networks"]
         guard_nets = facts["guard_networks"] or []

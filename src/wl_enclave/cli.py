@@ -338,8 +338,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # holds both: Watchlight says what authority the agent had, the guard
         # says where it actually tried to go.
         egress = []
+        guard_stopped_early = False
         if guard is not None:
             from .egress.local import read_egress_records
+
+            # Read the guard's final state before its records. A guard that
+            # died mid-run leaves a record file that looks merely quiet, and
+            # the single attestation was taken at provision time — too early to
+            # notice. Anything the sandbox attempted after the guard went down
+            # was refused by absence rather than by policy, and is absent from
+            # the file rather than denied in it.
+            final_state = guard.state() if hasattr(guard, "state") else {}
+            if final_state and final_state.get("guard_running") is False:
+                guard_stopped_early = True
+                chain.append("egress.guard_stopped", final_state)
+                _say(
+                    f"egress:    the guard stopped before the run ended "
+                    f"(exit {final_state.get('guard_exit_code')}); its records "
+                    f"are a lower bound"
+                )
 
             egress = read_egress_records(run.egress_file)
             for record in egress:
@@ -401,6 +418,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "egress_records_suppressed": len(suppressions),
                 "egress_records_dropped": records_dropped,
                 "egress_unrecognised": egress_unrecognised,
+                "egress_guard_stopped_early": guard_stopped_early,
                 "egress_allowed": egress_allowed,
                 "egress_denied": egress_denied,
             },
@@ -547,14 +565,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     elif result.egress_attested is False:
         _say("egress   NOT attested: the sandbox may have had another route")
     if not result.complete:
-        _say(
-            f"egress   INCOMPLETE: the guard reports {result.records_dropped} "
-            f"record(s) it could not write"
-        )
-        _say(
-            "         the egress records in this bundle are a lower bound, by "
-            "the guard's own account"
-        )
+        _say("egress   INCOMPLETE — by the bundle's own account:")
+        for reason in result.incomplete_reasons:
+            _say(f"         - {reason}")
     for problem in result.problems:
         print(f"            - {problem}")
     _say(result.summary)

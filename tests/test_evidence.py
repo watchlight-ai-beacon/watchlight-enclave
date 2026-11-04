@@ -135,7 +135,8 @@ def test_a_suppression_note_makes_the_bundle_incomplete_not_failed(tmp_path):
     assert result.records_dropped == 4096
     assert result.verdict == "incomplete"
     assert "INCOMPLETE" in result.summary
-    assert "4096" in result.summary
+    assert "1 reason" in result.summary
+    assert any("4096" in r for r in result.incomplete_reasons)
 
 
 def test_a_clean_bundle_is_complete(tmp_path):
@@ -148,3 +149,29 @@ def test_a_clean_bundle_is_complete(tmp_path):
     result = evidence.verify(bundle)
     assert (result.ok, result.complete, result.verdict) == (True, True, "ok")
     assert result.summary.startswith("OK")
+
+
+def test_a_guard_that_stopped_early_makes_the_bundle_incomplete(tmp_path):
+    """The other way the egress records become a lower bound.
+
+    Not records dropped under a limit, but records never taken, because nothing
+    was watching. A guard that died mid-run leaves a file that looks merely
+    quiet, and the attestation was taken at provision time — too early to
+    notice.
+    """
+    bundle = tmp_path / "bundle"
+    chain = evidence.ChainWriter(bundle)
+    chain.append("run.open", {"purpose": "t"})
+    chain.append("egress.attested", {"route_exclusive": True, "records_cover": ["http_connect"]})
+    chain.append("egress.guard_stopped", {"guard_running": False, "guard_exit_code": 137})
+    chain.append("run.close", {"exit_code": 0})
+    chain.seal({"agent": "t"})
+
+    result = evidence.verify(bundle)
+    assert result.complete is False
+    assert result.verdict == "incomplete"
+    assert any("stopped before the run ended" in r for r in result.incomplete_reasons)
+    assert result.problems == [], "a dead guard is not an integrity failure"
+    # Attested and complete are different claims: the topology really was
+    # exclusive, and the records are still an understatement.
+    assert result.egress_attested is True

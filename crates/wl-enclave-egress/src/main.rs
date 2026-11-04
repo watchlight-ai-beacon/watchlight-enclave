@@ -64,6 +64,11 @@ const TUNNEL_MAX_LIFETIME: Duration = Duration::from_secs(3_600);
 /// being accepted and starved, which keeps file descriptors bounded.
 const MAX_CONNECTIONS: usize = 256;
 
+/// Most 503 responses being written at once. Refusing a connection is cheap
+/// but not free: the response holds a descriptor until the client reads it or
+/// the timeout fires, and a connect flood arrives faster than clients drain.
+const MAX_REFUSALS_IN_FLIGHT: usize = 64;
+
 struct Guard {
     allowlist: Allowlist,
     recorder: Recorder,
@@ -123,6 +128,7 @@ async fn main() -> std::process::ExitCode {
         connections: AtomicU64::new(0),
     });
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let refusals = Arc::new(Semaphore::new(MAX_REFUSALS_IN_FLIGHT));
 
     // Drain on a signal rather than dropping tunnels mid-write: the records
     // already on disk are the point of the whole run.
@@ -159,12 +165,26 @@ async fn main() -> std::process::ExitCode {
                 let permit = match permits.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
-                        let guard = guard.clone();
                         let in_flight = MAX_CONNECTIONS - permits.available_permits();
-                        tokio::spawn(async move {
-                            guard.recorder.saturated(in_flight);
-                            refuse_saturated(stream).await;
-                        });
+                        guard.recorder.saturated(in_flight);
+                        // Bounded separately from the tunnel permits. This was
+                        // the only spawn in the data path with no limit, and
+                        // the path reached by a connect flood: each task holds
+                        // a descriptor for up to two seconds, so an unbounded
+                        // count of them is a way to exhaust the guard's own
+                        // memory and file descriptors from outside it.
+                        match refusals.clone().try_acquire_owned() {
+                            Ok(refusal_permit) => {
+                                tokio::spawn(async move {
+                                    let _refusal_permit = refusal_permit;
+                                    refuse_saturated(stream).await;
+                                });
+                            }
+                            // Past even that, drop the socket without the
+                            // courtesy of a 503. The refusal is already
+                            // recorded, which is the part that matters.
+                            Err(_) => drop(stream),
+                        }
                         continue;
                     }
                 };

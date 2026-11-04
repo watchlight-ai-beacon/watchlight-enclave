@@ -184,6 +184,18 @@ class EgressGuard(Protocol):
         """Problems that would stop a run; empty means ready. Never raises."""
         ...
 
+    def state(self) -> dict:
+        """What the runtime says the guard is doing *now*, read back from it.
+
+        Separate from :meth:`attest` because the two answer questions at
+        different times. An attestation is taken once, when the sandbox is
+        provisioned; this is asked again at the end, because a guard that
+        stopped witnessing part-way through leaves a record file that is merely
+        quiet. An implementation that cannot tell should return
+        ``{"guard_state_unreadable": True}`` rather than imply health.
+        """
+        ...
+
     def start(self, run_id: str, allowlist: Allowlist, record_file: Path) -> EgressEndpoint:
         """Bring the guard up and return where the sandbox should send traffic.
 
