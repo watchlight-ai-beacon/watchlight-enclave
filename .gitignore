@@ -1,0 +1,15 @@
+# build + runtime
+/target/
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+
+# enclave run artifacts
+.watchlight/
+/runs/
+*.tgz
+
+# os
+.DS_Store

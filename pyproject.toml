@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "watchlight-enclave"
+version = "0.0.1"
+description = "A governed, isolated runtime for autonomous AI agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Watchlight AI" }]
+keywords = ["ai-agents", "sandbox", "governance", "authorization", "cedar"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+dependencies = ["PyYAML>=6.0"]
+
+[project.scripts]
+wl-enclave = "wl_enclave.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wl_enclave"]
