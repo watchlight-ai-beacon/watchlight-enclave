@@ -171,6 +171,10 @@ class DockerDriver:
         Deliberately not a copy of :class:`SandboxSpec`. A bundle that repeats
         what we asked for proves nothing; this reports what the runtime says is
         in force, and records the runtime's own version alongside it.
+
+        Every isolation setting the driver sets must appear here. A setting
+        applied but not read back is indistinguishable, in the bundle, from one
+        that was never applied at all.
         """
         proc = self._run("inspect", sandbox.id)
         try:
@@ -200,6 +204,15 @@ class DockerDriver:
                 "pids_limit": host.get("PidsLimit"),
                 "memory_bytes": host.get("Memory"),
                 "nano_cpus": host.get("NanoCpus"),
+                # Paths covered with an empty filesystem, hiding whatever a
+                # mount would otherwise expose there. Read back because this is
+                # a security control, not a convenience: it is what keeps the
+                # run's own evidence out of reach of the workspace mount, and a
+                # control that does not appear in the attestation is one a
+                # reviewer has to take on trust. Docker reports these under
+                # HostConfig.Tmpfs rather than in Mounts, so they would
+                # otherwise be invisible in a bundle that lists every mount.
+                "masked_paths": sorted((host.get("Tmpfs") or {}).keys()),
             },
             "mounts": [
                 {

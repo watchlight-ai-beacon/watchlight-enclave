@@ -35,3 +35,11 @@ path = "examples/coder/agent.py"
 fingerprint = "b88d027abd3d7c235b58419a48c5710f:0"
 issue = "#1"
 reason = "Audit-class rule: fires on any non-literal urlopen argument. The concern it names is real and is mitigated rather than dismissed: urlopen also honours file://, which reads a local path without touching the network, so the egress guard would never see it and no egress.attempt record would exist. fetch() therefore rejects any URL that is not https:// before calling urlopen, and the docstring says why so the restriction survives being copied. The two call sites pass literals. Full review in #1."
+
+[[finding]]
+tool = "opengrep"
+rule = "community.python.lang.security.audit.dangerous-subprocess-use-audit"
+path = "tests/test_forgery_resistance.py"
+fingerprint = "2b5f85d77dbd5a818309ab0d5fce772a:0"
+issue = "#1"
+reason = "Test code, and the non-static argv is the point of the test. It invokes this project's own CLI end to end to prove a sandboxed agent cannot see its own run directory; the two non-literal elements are the venv path derived from __file__ and a temporary project directory the test itself creates under the home directory, which the container runtime requires because only the home directory is shared into a VM-backed daemon. Nothing attacker-controlled reaches the argv. Asserting this property against a real runtime is the only way to test it: a mocked version would assert that the code agrees with itself, which is the failure mode being guarded against. Full review in #1."

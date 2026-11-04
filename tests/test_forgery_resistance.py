@@ -123,6 +123,21 @@ def test_one_attestation_is_reported_without_complaint(tmp_path):
     assert result.ok and result.egress_attested is True
 
 
+# -- a control that is not attested is a control nobody can check ----------
+
+def test_the_spec_declares_the_mask_so_a_driver_can_attest_it():
+    """The mask is a security control, so it has to reach the bundle.
+
+    An isolation setting that is applied but never read back is
+    indistinguishable, in the bundle, from one that was never applied. This is
+    the same reason ``attest()`` exists rather than echoing SandboxSpec.
+    """
+    from wl_enclave.drivers import SandboxSpec
+
+    spec = SandboxSpec(name="n", image="i", command=["c"], shadow=["/work/runs"])
+    assert spec.shadow == ["/work/runs"]
+
+
 # -- end to end, against a real runtime ------------------------------------
 
 @pytest.mark.skipif(
@@ -180,5 +195,17 @@ def test_a_sandbox_cannot_see_its_own_run_directory(tmp_path):
         assert found["wrote"] == [], f"the sandbox wrote into its own bundle: {found['wrote']}"
         # And nothing was actually created on the host.
         assert list(project.glob("runs/*/bundle/agent-was-here")) == []
+
+        # The mask must also be visible in the bundle. A reviewer who cannot
+        # see the control in the evidence has to take our word for it, which is
+        # the thing this whole mechanism is trying to avoid.
+        chain = next(project.glob("runs/*/bundle/chain.jsonl")).read_text()
+        attested = [
+            json.loads(line) for line in chain.splitlines()
+            if json.loads(line)["type"] == "sandbox.attested"
+        ]
+        assert attested, "no sandbox.attested record"
+        masked = attested[0]["data"]["constraints"]["masked_paths"]
+        assert "/work/runs" in masked, f"the mask is not attested: {masked}"
     finally:
         shutil.rmtree(project, ignore_errors=True)
