@@ -139,3 +139,58 @@ def test_invalid_yaml_is_reported_as_such(tmp_path):
     with pytest.raises(config.ConfigError) as exc:
         config.load(write(tmp_path, "version: 1\n  bad: [indent", policies=False))
     assert any("YAML" in p for p in exc.value.problems)
+
+
+# -- the loader and the guard must agree about what a rule is --------------
+
+@pytest.mark.parametrize(
+    "entry",
+    ["*openai.com:443", "openai.*:443", "api.*.openai.com:443", "*:443", "*.:443"],
+)
+def test_a_wildcard_anywhere_but_a_leading_dot_is_refused(tmp_path, entry):
+    """A containment bug, not a style preference.
+
+    ``*openai.com`` once stripped to the dotless suffix ``openai.com``, and a
+    suffix match then admitted ``evilopenai.com`` under a rule meant to name
+    subdomains. Nothing downstream can recover the intent, so the shape is
+    required at load.
+    """
+    body = MINIMAL + f'egress:\n  allow:\n    - "{entry}"\n'
+    with pytest.raises(config.ConfigError) as exc:
+        config.load(write(tmp_path, body))
+    assert any("wildcard" in p or "domain after" in p for p in exc.value.problems)
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "70000", "99999"])
+def test_a_port_outside_the_valid_range_is_refused(tmp_path, port):
+    """The loader used to accept what the guard refuses.
+
+    The guard parses the port as a u16 and rejects zero, so it exited on
+    startup while the run carried on — producing a bundle that read "attested,
+    no attempts", which is the shape of a clean run.
+    """
+    body = MINIMAL + f'egress:\n  allow:\n    - "example.com:{port}"\n'
+    with pytest.raises(config.ConfigError) as exc:
+        config.load(write(tmp_path, body))
+    assert any("65535" in p for p in exc.value.problems)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["example.com:443", "*.openai.com:443", "a.b.c.example.com:1", "x.example.com:65535"],
+)
+def test_valid_rules_are_accepted(tmp_path, entry):
+    body = MINIMAL + f'egress:\n  allow:\n    - "{entry}"\n'
+    assert config.load(write(tmp_path, body)).egress_allow == [entry]
+
+
+def test_the_loader_uses_the_guards_own_validator():
+    """One validator, not two.
+
+    Two copies drift, and the drift is the bug above: the loader accepting what
+    the guard refuses.
+    """
+    from wl_enclave import config as config_module
+    from wl_enclave.egress import entry_problem
+
+    assert config_module.entry_problem is entry_problem

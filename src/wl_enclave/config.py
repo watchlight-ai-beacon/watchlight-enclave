@@ -16,6 +16,8 @@ from typing import Any, Optional
 
 import yaml
 
+from .egress import entry_problem
+
 #: ``enclave.yaml`` schema version this build understands.
 SCHEMA_VERSION = 1
 
@@ -24,7 +26,6 @@ KNOWN_RUNTIMES = ("docker", "podman", "openshell")
 
 _DURATION = re.compile(r"^(\d+)(s|m|h)$")
 _SIZE = re.compile(r"^(\d+)(Mi|Gi)$", re.IGNORECASE)
-_HOSTPORT = re.compile(r"^(?P<host>[A-Za-z0-9._*-]+):(?P<port>\d{1,5})$")
 
 #: An OCI image reference, constrained enough to be safe as an argv element.
 #:
@@ -221,10 +222,12 @@ def load(path: Path) -> Config:
         egress_raw = {}
     allow = _require_str_list(egress_raw.get("allow"), "egress.allow", problems)
     for entry in allow:
-        if not _HOSTPORT.match(entry):
-            problems.append(
-                f"egress.allow: {entry!r} must be host:port (e.g. api.anthropic.com:443)"
-            )
+        # Validated by the guard's own rules, not a second copy of them: a
+        # loader that accepts what the guard refuses lets a run start with a
+        # guard that exits immediately.
+        problem = entry_problem(entry)
+        if problem:
+            problems.append(f"egress.allow: {entry!r} {problem}")
 
     # --- limits ------------------------------------------------------------
     limits_raw = raw.get("limits") or {}

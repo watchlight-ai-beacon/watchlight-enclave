@@ -26,6 +26,7 @@ from typing import Optional, Protocol, runtime_checkable
 
 __all__ = [
     "EGRESS_ATTESTED",
+    "entry_problem",
     "EGRESS_UNRECOGNISED",
     "GUARD_RECORD_TYPES",
     "EGRESS_RECORD",
@@ -58,6 +59,7 @@ GUARD_RECORD_TYPES = frozenset({
     "egress.attempt",
     "egress.tunnel",
     "egress.records_suppressed",
+    "egress.saturated",
 })
 
 #: Where a record whose declared type is not in :data:`GUARD_RECORD_TYPES` is
@@ -66,6 +68,44 @@ GUARD_RECORD_TYPES = frozenset({
 EGRESS_UNRECOGNISED = "egress.unrecognised"
 
 _HOSTPORT = re.compile(r"^(?P<host>[A-Za-z0-9._*-]+):(?P<port>\d{1,5})$")
+
+#: Characters a hostname label sequence may contain, once any wildcard is off.
+_LABELS = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def entry_problem(entry: str) -> Optional[str]:
+    """Why ``entry`` is not a usable ``host:port`` rule, or ``None`` if it is.
+
+    One function, used by both the configuration loader and the guard, because
+    two validators drift and the drift is a security bug rather than an
+    inconvenience: the loader accepting what the guard refuses means ``doctor``
+    passes a configuration that produces a guard which exits on startup, and a
+    run whose bundle then reads "attested, no attempts" — the shape of a clean
+    run. The rules here are the rules the Rust matcher enforces.
+    """
+    if not isinstance(entry, str) or ":" not in entry:
+        return "must be host:port (e.g. api.anthropic.com:443)"
+    host, _, port_text = entry.rpartition(":")
+    if not host:
+        return "has no host"
+    if not port_text.isdigit():
+        return "has a non-numeric port"
+    port = int(port_text)
+    # Matched to the guard, which parses the port as a u16 and refuses zero.
+    if not 1 <= port <= 65535:
+        return f"has port {port}, which is outside 1-65535"
+    if host.startswith("*."):
+        rest = host[2:]
+        if not rest:
+            return "has no domain after the wildcard"
+        if "*" in rest:
+            return 'may only use a wildcard as a leading "*."'
+        return None if _LABELS.match(rest) else "has an invalid hostname"
+    if "*" in host:
+        # The bug this closes: "*openai.com" once stripped to the dotless
+        # suffix "openai.com", so a suffix match admitted "evilopenai.com".
+        return 'may only use a wildcard as a leading "*."'
+    return None if _LABELS.match(host) else "has an invalid hostname"
 
 
 class GuardError(Exception):

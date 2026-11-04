@@ -145,7 +145,26 @@ async fn main() -> std::process::ExitCode {
                     // guard: the sandbox would then have no mediation at all.
                     Err(err) => { eprintln!("wl-enclave-egress: accept failed: {err}"); continue; }
                 };
-                let Ok(permit) = permits.clone().acquire_owned().await else { continue };
+                // try_acquire, never await. Awaiting a permit here parks the
+                // whole select!, which has two consequences worse than
+                // refusing the connection: no further attempt is accepted or
+                // recorded, so an agent holding MAX_CONNECTIONS idle tunnels
+                // open could make its subsequent attempts vanish from the
+                // bundle; and the shutdown arm stops being polled, so SIGTERM
+                // is never observed and the guard is eventually killed with
+                // records still buffered.
+                let permit = match permits.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let guard = guard.clone();
+                        let in_flight = MAX_CONNECTIONS - permits.available_permits();
+                        tokio::spawn(async move {
+                            guard.recorder.saturated(&peer.to_string(), in_flight);
+                            refuse_saturated(stream).await;
+                        });
+                        continue;
+                    }
+                };
                 let guard = guard.clone();
                 guard.connections.fetch_add(1, Ordering::Relaxed);
                 tokio::spawn(async move {
@@ -157,6 +176,21 @@ async fn main() -> std::process::ExitCode {
             }
         }
     }
+}
+
+/// Tell a client the guard is saturated, then drop it.
+///
+/// Bounded and best-effort: this path exists because the guard is already at
+/// capacity, so it must not acquire anything or wait on the client.
+async fn refuse_saturated(mut stream: TcpStream) {
+    let _ = timeout(
+        Duration::from_secs(2),
+        stream.write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ),
+    )
+    .await;
+    let _ = stream.shutdown().await;
 }
 
 async fn shutdown_signal() {

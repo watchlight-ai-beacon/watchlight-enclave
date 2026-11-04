@@ -241,3 +241,24 @@ def test_a_sandbox_cannot_see_its_own_run_directory(tmp_path):
         assert "/work/runs" in masked, f"the mask is not attested: {masked}"
     finally:
         shutil.rmtree(project, ignore_errors=True)
+
+
+def test_the_closed_set_matches_every_type_the_guard_actually_writes():
+    """The two must not drift, in either direction.
+
+    A type the guard writes but the set omits is filed as unrecognised, so
+    genuine evidence is demoted and the run.close counters stop matching the
+    chain. A type in the set that the guard never writes is a slot something
+    else could occupy. Reading the Rust source is crude but it fails loudly the
+    moment a record type is added on one side only, which is the bug this
+    guards.
+    """
+    import re
+
+    source = (REPO / "crates" / "wl-enclave-egress" / "src" / "recorder.rs").read_text()
+    written = set(re.findall(r'"event"\s*:\s*"([^"]+)"', source))
+    assert written, "found no record types in the recorder; has it moved?"
+    assert written == set(GUARD_RECORD_TYPES), (
+        f"only the guard writes: {sorted(written - set(GUARD_RECORD_TYPES))}; "
+        f"only the closed set has: {sorted(set(GUARD_RECORD_TYPES) - written)}"
+    )

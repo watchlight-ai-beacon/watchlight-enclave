@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -61,6 +62,15 @@ from . import Allowlist, EgressEndpoint, GuardError
 #: rather than having to know how the guard works.
 RECORDS_COVER = ["http_connect"]
 BLOCKED_NOT_RECORDED = ["raw_tcp", "udp", "icmp"]
+
+#: What the guard prints once its listener is bound. Coupled to the guard's
+#: own startup message on purpose: it is the only signal available that the
+#: socket exists, given the runtime image ships no network tools. A test
+#: asserts the two stay in step.
+GUARD_READY_MARKER = "listening on"
+
+#: How long to wait for the guard to start accepting before giving up.
+GUARD_START_TIMEOUT = 15.0
 
 #: Port the guard listens on inside the sandbox's network.
 GUARD_PORT = 8080
@@ -175,6 +185,14 @@ class LocalEgressGuard:
             # Attach the guard to the default bridge as well: it is now the
             # only thing on the internal network with a way out.
             self._run("network", "connect", "bridge", container)
+            # `run --detach` returns as soon as the container is created, so a
+            # guard that exits immediately — a rejected allowlist, a port it
+            # cannot bind — still looks like a successful start. The run would
+            # then proceed with nothing listening: every connection refused by
+            # absence rather than by policy, no records written, and a bundle
+            # reading "attested, no attempts", which is the shape of a clean
+            # run. Confirm it is actually up before handing out its address.
+            self._await_listening(container)
         except GuardError:
             self.stop()
             raise
@@ -193,6 +211,42 @@ class LocalEgressGuard:
         if self._network:
             self._run("network", "rm", self._network, check=False)
             self._network = None
+
+    def _await_listening(self, container: str) -> None:
+        """Block until the guard is running and accepting, or raise.
+
+        Polls rather than sleeping a fixed interval: a cold start is fast and a
+        failure is faster still, and the error a dead guard leaves in its own
+        logs is the only useful diagnosis available.
+        """
+        deadline = time.monotonic() + GUARD_START_TIMEOUT
+        last = ""
+        while time.monotonic() < deadline:
+            state = self._run(
+                "inspect", container, "--format", "{{.State.Status}}|{{.State.ExitCode}}",
+                check=False, timeout=30,
+            )
+            status, _, exit_code = state.stdout.strip().partition("|")
+            if status in {"exited", "dead"}:
+                detail = (self.logs() or "").strip().splitlines()
+                raise GuardError(
+                    f"the guard exited immediately (status {status}, exit {exit_code})"
+                    + (f": {detail[-1]}" if detail else "")
+                )
+            if status == "running":
+                # The guard prints this only after its listener is bound, so
+                # the line is proof the socket exists. Probing the port from
+                # outside would need a tool the runtime image deliberately does
+                # not ship, or a throwaway container on the internal network.
+                last = self.logs()
+                if GUARD_READY_MARKER in last:
+                    return
+            time.sleep(0.1)
+        tail = (last or "").strip().splitlines()
+        raise GuardError(
+            f"the guard did not report a bound listener within {GUARD_START_TIMEOUT}s"
+            + (f": {tail[-1]}" if tail else "")
+        )
 
     def attest(self, sandbox_ref: Optional[str] = None) -> dict:
         """Read the network layout back out of Docker.

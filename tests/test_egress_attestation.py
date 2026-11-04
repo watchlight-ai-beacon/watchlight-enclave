@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from wl_enclave.egress import Allowlist
+from wl_enclave.egress import Allowlist, GuardError
 from wl_enclave.egress.local import LocalEgressGuard
 
 pytestmark = pytest.mark.skipif(
@@ -96,3 +96,55 @@ def test_attestation_with_no_guard_running_reports_no_route():
     facts = LocalEgressGuard().attest("whatever")
     assert facts["route_exclusive"] is False
     assert any("no guard network" in p for p in facts["problems"])
+
+
+# -- a dead guard must fail the run, not produce a quiet bundle ------------
+
+def test_the_ready_marker_matches_what_the_guard_prints():
+    """String coupling between two languages, so assert it rather than hope.
+
+    If the guard's startup message changes, the readiness wait would time out
+    on a perfectly healthy guard and block every run with egress enabled.
+    """
+    from wl_enclave.egress.local import GUARD_READY_MARKER
+
+    source = (REPO / "crates" / "wl-enclave-egress" / "src" / "main.rs").read_text()
+    assert GUARD_READY_MARKER in source, (
+        f"the guard no longer prints {GUARD_READY_MARKER!r}; the readiness "
+        f"wait in local.py is coupled to it"
+    )
+
+
+def test_a_guard_that_exits_immediately_fails_the_start(tmp_path):
+    """The failure that used to read as a clean run.
+
+    `run --detach` returns once the container is created, so a guard that exits
+    on startup still looked like a successful start. The run then proceeded with
+    nothing listening: every connection refused by absence rather than by
+    policy, no records written, and a bundle saying "attested, no attempts".
+
+    Induced by substituting an image that exits as soon as it starts, which is
+    what a guard refusing its own configuration looks like from outside.
+    """
+    rec = REPO / "runs" / f"dead-{uuid.uuid4().hex[:8]}.jsonl"
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    if _docker("image", "inspect", "alpine:3.21").returncode != 0:
+        if _docker("pull", "alpine:3.21").returncode != 0:
+            pytest.skip("cannot obtain a substitute image")
+
+    from wl_enclave.egress import local as local_mod
+
+    g = LocalEgressGuard()
+    if g.preflight():
+        pytest.skip("guard not buildable here")
+    original = local_mod.GUARD_IMAGE
+    local_mod.GUARD_IMAGE = "alpine:3.21"  # runs /bin/sh with no input, exits
+    try:
+        with pytest.raises(GuardError) as exc:
+            g.start(f"d{uuid.uuid4().hex[:8]}", Allowlist(["example.com:443"]), rec)
+        message = str(exc.value)
+        assert "exited immediately" in message or "bound listener" in message, message
+    finally:
+        local_mod.GUARD_IMAGE = original
+        g.stop()
+        rec.unlink(missing_ok=True)

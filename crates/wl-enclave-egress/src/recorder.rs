@@ -59,6 +59,25 @@ impl Recorder {
     /// Record one attempt. Never fails the request it is describing: a guard
     /// that refused traffic because it could not write a log would be a denial
     /// of service with extra steps.
+    /// Record a connection refused because the guard was at capacity.
+    ///
+    /// The destination is deliberately absent: the request head was never
+    /// read, so the guard does not know it and must not invent it. What
+    /// matters for a reviewer is that a connection was refused for a reason
+    /// that has nothing to do with the allowlist, because an agent that can
+    /// saturate the guard could otherwise make its own attempts disappear.
+    pub fn saturated(&self, peer: &str, in_flight: usize) {
+        let record = serde_json::json!({
+            "ts": iso8601_now(),
+            "event": "egress.saturated",
+            "peer": sanitize(peer),
+            "in_flight": in_flight,
+            "verdict": "deny",
+            "reason": "connection limit reached; the destination was never read",
+        });
+        self.write(record);
+    }
+
     pub fn attempt(&self, host: &str, port: u16, allowed: bool, reason: &str, protocol: &str) {
         let record = serde_json::json!({
             "ts": iso8601_now(),

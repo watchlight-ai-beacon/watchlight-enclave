@@ -45,9 +45,31 @@ impl Allowlist {
             if host.is_empty() || port == 0 {
                 return Err(format!("{entry:?} must be host:port"));
             }
-            if !host
+            // A wildcard is accepted in exactly one shape: a leading "*."
+            // followed by a label sequence. Accepting `*` anywhere was a
+            // containment bug, not a convenience: `*openai.com` stripped to the
+            // dotless suffix `openai.com`, and a suffix match then admitted
+            // `evilopenai.com`. Nothing downstream can recover the intent, so
+            // the shape is required here.
+            let labels = match host.strip_prefix("*.") {
+                Some(rest) => {
+                    if rest.is_empty() {
+                        return Err(format!("{entry:?} has no domain after the wildcard"));
+                    }
+                    rest
+                }
+                None => {
+                    if host.contains('*') {
+                        return Err(format!(
+                            "{entry:?} may only use a wildcard as a leading \"*.\""
+                        ));
+                    }
+                    host
+                }
+            };
+            if !labels
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'*'))
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
             {
                 return Err(format!("{entry:?} has an invalid hostname"));
             }
@@ -86,7 +108,11 @@ impl Allowlist {
                 };
             }
             if let Some(suffix) = pattern.strip_prefix('*') {
-                // suffix keeps its leading dot, so the apex cannot match.
+                // The parser guarantees the pattern begins "*.", so suffix
+                // keeps its leading dot and the apex cannot match. Without
+                // that guarantee a dotless suffix would match any host merely
+                // ending in those characters.
+                debug_assert!(suffix.starts_with('.'));
                 if host.ends_with(suffix) && host.len() > suffix.len() {
                     return Verdict {
                         allowed: true,
@@ -176,3 +202,44 @@ mod tests {
         assert!(Allowlist::parse("ho st:443").is_err());
     }
 }
+
+    #[test]
+    fn a_wildcard_not_followed_by_a_dot_is_refused() {
+        // The bug this guards: `*openai.com` once stripped to the dotless
+        // suffix `openai.com`, so `evilopenai.com` matched a rule that was
+        // meant to name subdomains of openai.com.
+        for pattern in [
+            "*openai.com:443",
+            "api.*.openai.com:443",
+            "openai.*:443",
+            "*:443",
+            "*.:443",
+        ] {
+            assert!(
+                Allowlist::parse(pattern).is_err(),
+                "{pattern} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_wildcard_cannot_admit_a_lookalike_host() {
+        // Belt and braces: even if a dotless pattern reached the matcher, the
+        // lookalike must not be admitted.
+        let list = Allowlist::parse("*.openai.com:443").expect("parses");
+        assert!(!list.permits("evilopenai.com", 443).allowed);
+        assert!(!list.permits("notopenai.com", 443).allowed);
+        assert!(list.permits("api.openai.com", 443).allowed);
+        assert!(!list.permits("openai.com", 443).allowed);
+    }
+
+    #[test]
+    fn a_port_outside_the_valid_range_is_refused() {
+        for pattern in ["example.com:0", "example.com:70000", "example.com:65536"] {
+            assert!(
+                Allowlist::parse(pattern).is_err(),
+                "{pattern} should be refused"
+            );
+        }
+        assert!(Allowlist::parse("example.com:65535").is_ok());
+    }
