@@ -15,28 +15,78 @@
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue" /></a>
   <a href="#"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-fbbf24" /></a>
   <a href="crates/wl-enclave-egress"><img alt="Rust" src="https://img.shields.io/badge/rust-1.82%2B-fbbf24" /></a>
-  <a href="docs/quickstart.md"><img alt="Docs" src="https://img.shields.io/badge/docs-quickstart-fbbf24" /></a>
+  <a href="docs/README.md"><img alt="Docs" src="https://img.shields.io/badge/docs-quickstart-fbbf24" /></a>
   <a href="#"><img alt="Status: early development" src="https://img.shields.io/badge/status-early%20development-orange" /></a>
 </p>
 
-Watchlight AI Enclave runs an agent inside a sandbox and puts a policy decision
-point in front of every tool call it makes. Two layers enforce at once: the
-sandbox decides where the agent may connect, and
-[Watchlight](https://github.com/watchlight-ai-beacon/watchlight-de) decides what
-authority it has. Every run produces a verifiable evidence bundle covering both.
+You hand an agent a repo and a task. It can edit files, call tools, and reach
+the network. Two questions follow immediately, and neither is answerable after
+the fact by reading logs the agent could have written:
+
+- **What did it actually try to reach?**
+- **What was it allowed to do, and who decided?**
+
+Enclave answers both, and produces a bundle you can hand to someone who
+doesn't trust you.
+
+```bash
+wl-enclave init                          # writes enclave.yaml, scaffolds a policy
+wl-enclave run --purpose "Fix PR #412"   # runs the agent in a sandbox
+wl-enclave verify runs/<id>/bundle       # checks the evidence, offline
+```
+
+That last command is the point. It needs no account, no network, and no
+Watchlight:
+
+```text
+$ wl-enclave verify runs/20261105-013320-a946d0/bundle
+wl-enclave: bundle   runs/20261105-013320-a946d0/bundle
+wl-enclave: records  11
+wl-enclave: head     7fc25cbd846f1dd1…
+wl-enclave: egress   attested: the guard was the sandbox's only route
+wl-enclave:          records cover http_connect only; other traffic was blocked, not recorded
+wl-enclave: controls 11/11 in force
+wl-enclave: governed by sha256:c63334f542a4b405f6f8099cc7889c801d0b5969c5d4cfd0359915d15c5e627f
+wl-enclave: OK — 11 records, chain intact, unsigned
+```
+
+Inside that bundle, the agent's attempt to reach a host that wasn't on the
+allowlist:
+
+```json
+{
+  "seq": 9,
+  "type": "egress.attempt",
+  "data": {
+    "host": "pastebin.com",
+    "port": 443,
+    "verdict": "deny",
+    "reason": "pastebin.com:443 is not in the allowlist"
+  },
+  "prev": "5d14a325b148e3d1…",
+  "hash": "9d8824737848d29d…"
+}
+```
+
+The agent couldn't have suppressed that record, because it isn't the one who
+wrote it.
+
+## Two layers, and why you need both
+
+**The sandbox** decides where the agent may connect. An internal Docker network
+with no route out, and an egress guard that is the only way through.
+
+**[Watchlight](https://github.com/watchlight-ai-beacon/watchlight-de)** decides
+what authority the agent has — which tools, on which resources, under whose
+policy. Standard [Cedar](https://www.cedarpolicy.com/), so the policy is
+readable and the decisions are deterministic.
+
+Neither substitutes for the other. Watchlight knows the agent *asked to wire
+money*. The guard knows it *tried to reach pastebin.com*. You can't derive
+either from the other, and a bundle carries both.
 
 > **Status: early development.** No releases yet. The CLI, the config format and
 > the evidence bundle are all subject to change.
-
-## Quick start
-
-```bash
-wl-enclave init                        # write enclave.yaml, scaffold a policy
-wl-enclave run --purpose "Fix PR #412" # run the agent in a sandbox
-wl-enclave verify runs/<id>/bundle     # check the evidence offline
-```
-
-See [`docs/quickstart.md`](docs/quickstart.md).
 
 ## How it fits together
 
@@ -111,6 +161,39 @@ Bundles are not yet signed, so a bundle proves the chain is internally
 consistent, not who produced it — `verify` says so on every run rather than
 letting you assume otherwise.
 
+## What it does not do yet
+
+Worth knowing before you build on it.
+
+**Bundles are unsigned.** The hash chain catches *edits* — change a record and
+every hash after it breaks. It does nothing about *truncation*: lop records off
+the end and what remains is a shorter, perfectly valid chain. `verify` says so
+out loud rather than letting you assume otherwise:
+
+```text
+note: the chain is internally consistent but unsigned, so it proves nothing
+      about who produced it
+```
+
+Signing is the biggest open item — issues
+[#2–#6](https://github.com/watchlight-ai-beacon/watchlight-enclave/issues).
+
+**Traffic the topology blocks isn't recorded.** If the agent opens a raw socket
+to port 9999, there's no route, so it fails. But the guard never sees it, so
+there's no line in your bundle. Blocked, not described — and the bundle states
+this about itself in `blocked_not_recorded` rather than leaving you to find out.
+[#12](https://github.com/watchlight-ai-beacon/watchlight-enclave/issues/12).
+
+**Decision records are cooperative.** The SDK is a library the agent calls. An
+agent that doesn't call it produces no decision records, and the bundle can't
+tell you whether that means "made no decisions" or "went around the SDK". The
+egress records don't have this problem, because the agent can't route around the
+network topology. Don't read the two streams as equally strong.
+
+**The workspace is writable**, so a run can edit the rules the *next* run is
+held to. We make that visible with digests rather than preventing it.
+[#13](https://github.com/watchlight-ai-beacon/watchlight-enclave/issues/13).
+
 ## Repository layout
 
 | Path | Contents |
@@ -119,7 +202,7 @@ letting you assume otherwise.
 | `src/wl_enclave/drivers/` | runtime drivers behind one `RuntimeDriver` protocol |
 | `src/wl_enclave/egress/` | egress guards behind one `EgressGuard` protocol |
 | `crates/wl-enclave-egress/` | the guard itself: a CONNECT allowlist in Rust |
-| `docs/` | quickstart and reference |
+| [`docs/`](docs/README.md) | the quickstart — install, first run, reading a bundle |
 | `docs/design/` | design notes — what a bundle proves, trust boundaries, the control vocabulary, egress coverage, writing a driver |
 | `examples/` | runnable agents with policies |
 
@@ -144,11 +227,17 @@ Both are **free to use, including in production and commercially.** A commercial
 license is needed only to re-offer the engine itself as a hosted authorization
 service.
 
-Nothing here requires trusting a black box to trust a decision. Policies are
-standard [Cedar](https://www.cedarpolicy.com/) — open, formally specified and
-deterministic. The evidence format is documented and verifiable with
-`wl-enclave verify`, which needs no account and no network. Signing keys are the
-part we hold; the format you can read yourself.
+You don't have to trust a black box to trust a decision. Policies are standard
+[Cedar](https://www.cedarpolicy.com/) — open, formally specified, deterministic.
+The evidence format is documented, and `wl-enclave verify` reads it with no
+account and no network.
+
+Bundles are not signed yet, so nothing in this repository depends on a key we
+hold. When signing lands, the design question is whose key it is — a key the
+operator holds makes a bundle evidence against the *agent*, and evidence against
+the *operator* needs a key the operator can't wield alone. Those are different
+claims and we won't blur them. That discussion is in the open, in issues
+[#2–#6](https://github.com/watchlight-ai-beacon/watchlight-enclave/issues).
 
 Want the engine source, an air-gapped build, or to govern a fleet in
 production? [email sales@watchlight.ai](mailto:sales@watchlight.ai?subject=Watchlight%20AI%20Enclave).

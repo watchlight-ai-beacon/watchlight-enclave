@@ -6,6 +6,10 @@ and end up with a file you can hand to a security reviewer.
 Budget about fifteen minutes the first time. Most of that is a one-off Rust
 build, and we'll tell you when it's coming.
 
+*This is the docs home. Once you've done a run, the design notes in
+[`design/`](design/README.md) cover how it works and why — including what a
+bundle does and doesn't prove.*
+
 ## Before you start
 
 You need a container runtime. Docker is the default because you probably
