@@ -181,25 +181,46 @@ wl-enclave verify runs/<id>/bundle
 ```
 
 ```text
-wl-enclave: records  10
-wl-enclave: head     d8a66511ae941182…
+wl-enclave: records  11
+wl-enclave: head     15cdbefbc6455a0d…
 wl-enclave: egress   attested: the guard was the sandbox's only route
 wl-enclave:          records cover http_connect only; other traffic was blocked, not recorded
-wl-enclave: OK — 10 records, chain intact, unsigned
+wl-enclave: controls 10/10 in force
+wl-enclave: governed by sha256:c63334f542a4b405f6f8099cc7889c801d0b5969c5d4cfd0359915d15c5e627f
+wl-enclave: OK — 11 records, chain intact, unsigned
 ```
 
-No account, no network, not even Watchlight. The bundle holds four kinds of
+No account, no network, not even Watchlight. The bundle holds these kinds of
 record, because no one layer can answer for the others:
 
 | Record | What it tells you |
 |---|---|
 | `sandbox.attested` | the constraints the sandbox ran under — no network of its own, read-only root, capabilities dropped, memory and PID ceilings — read back **out of Docker**, not copied from what we asked for |
+| `config.attested` | a hash of `enclave.yaml` and every policy file that governed this run |
 | `decision` | every authorization decision: who, what intent, which resource, allowed or denied |
-| `egress.attempt` | every connection the agent tried: host, port, verdict, and the rule that decided it |
+| `egress.attempt` | every connection the agent tried: host, port, verdict, the rule that decided it, and the IP it resolved to |
+| `egress.malformed` | a request the guard could not parse — refused, and still counted |
+| `egress.tunnel` | how many bytes crossed an allowed connection, and for long ones `egress.tunnel_progress` while it is still open |
 | `egress.attested` | whether the runtime *confirms* the guard was the sandbox's only route, and **what the records cover** |
 
-That last one is what stops the other three from being read for more than they
+That last one is what stops the others from being read for more than they
 say. See [What the bundle proves](#what-the-bundle-proves-and-what-it-doesnt).
+
+Two lines in that output are worth knowing about.
+
+**`controls 10/10 in force`** is the attestation broken out one control at a
+time, each saying whether it held *and how we know*. `runtime_readback` means it
+was read out of the running system; `runtime_config_readback` means it came from
+the runtime's record of what the container was asked for, which catches a
+setting that never reached the daemon but is not the kernel's account of what is
+in force. Anything not in force is listed underneath with the reason.
+
+**`governed by`** is a hash of the config and policy files this run was held to.
+Your workspace is writable — an agent that cannot write code cannot do the job —
+so a run can edit the rules its successor will be held to. This does not prevent
+that. It means two runs held to different rules cannot read as two runs held to
+the same rules, and a run that widened its successor's allowlist leaves the
+widening in its own evidence.
 
 Each record is chained to the one before. Change one and every hash after it
 stops matching. Try it:
@@ -241,6 +262,23 @@ inside the sandbox's own network namespace is what turns that into a continuous
 guarantee, and where a runtime provides one, Enclave should consume its events
 rather than reimplement them.
 
+**`verify` has four answers, and they are not degrees of the same thing.**
+Collapsing them would be the easiest way to make this output worthless, because
+a reviewer who learns that one bad word covers everything stops reading the
+word.
+
+| Verdict | Exit | What it means |
+|---|---|---|
+| `OK` | 0 | the chain verifies, every control held, nothing is known to be missing |
+| `INCOMPLETE` | 1 | everything the bundle says is true, and some of what happened is not in it — a dropped record, a control that could not be determined, a guard that stopped early |
+| `UNCONTAINED` | 1 | the chain verifies and reports that a control did *not* hold. The evidence is trustworthy; it is telling you something bad |
+| `FAILED` | 1 | the chain itself does not verify — edited, reordered, or truncated. Nothing else in the bundle can be relied on |
+
+`UNCONTAINED` is the one worth dwelling on. It is not a weaker `FAILED`:
+`FAILED` says *do not trust this file*, while `UNCONTAINED` says *trust this
+file, and act on what it says*. Reporting a sandbox whose isolation slipped as
+`FAILED` would tell you the opposite of the truth.
+
 **If `route_exclusive` is `false`**, the sandbox had another path to the network.
 The proxy variables were then advice it could ignore, and the egress records are
 a lower bound rather than an account. `verify` says so plainly, because a bundle
@@ -248,9 +286,16 @@ that is quietly incomplete is worse than one that admits the gap.
 
 **It's unsigned.** The chain catches edits and corruption. It does not prove who
 produced it: anyone who can edit the file can also recompute the chain over
-their edit, and `verify` says so rather than letting you assume otherwise. A
-signature is what makes a bundle evidence against its own author, and that key
-belongs somewhere the agent's machine can't reach.
+their edit, and `verify` says so rather than letting you assume otherwise.
+
+Hash chaining also does not stop **truncation**. Drop records off the end and
+what remains is a shorter, perfectly valid chain — which is why `verify`
+reports what the bundle says about its own gaps (`records_dropped`, a guard
+that stopped early, a control it could not confirm) rather than only checking
+hashes. A signature over the sealed manifest is what closes truncation
+properly, and that key belongs somewhere neither the agent nor the project
+directory can reach. Signing is not implemented yet; `verify` says `unsigned`
+on every bundle today, and the design is tracked in the repository's issues.
 
 ## Day-to-day
 

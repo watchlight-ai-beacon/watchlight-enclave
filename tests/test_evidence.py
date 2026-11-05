@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 
 import pytest
@@ -252,3 +253,56 @@ def test_a_later_record_can_only_weaken_a_control_never_strengthen_it(tmp_path):
     assert attestation.merge(unknown, strong)["c"]["in_force"] is None
     assert attestation.merge(unknown, weak)["c"]["in_force"] is False
     assert attestation.merge(weak, unknown)["c"]["in_force"] is False
+
+
+# -- the exit codes the quickstart promises a CI gate ----------------------
+
+@pytest.mark.parametrize(
+    "records,expected_verdict",
+    [
+        ([], "ok"),
+        ([("sandbox.attested", {"controls": {
+            "rootfs_read_only": {"in_force": False, "verified_by": "runtime_config_readback"}}})],
+         "uncontained"),
+        ([("egress.records_suppressed", {"records_dropped": 3})], "incomplete"),
+    ],
+)
+def test_each_verdict_is_reachable_and_distinct(tmp_path, records, expected_verdict):
+    """Documented in the quickstart as a gate contract, so pinned here.
+
+    Four verdicts that collapse into two would make the output worthless: a
+    reviewer who learns one bad word covers everything stops reading the word.
+    """
+    bundle = tmp_path / "bundle"
+    chain = evidence.ChainWriter(bundle)
+    chain.append("run.open", {"purpose": "t"})
+    for kind, data in records:
+        chain.append(kind, data)
+    chain.append("run.close", {"exit_code": 0})
+    chain.seal({"agent": "t"})
+
+    assert evidence.verify(bundle).verdict == expected_verdict
+
+
+def test_only_ok_exits_zero(tmp_path, monkeypatch, capsys):
+    """A gate branches on the exit code, so every non-ok verdict must be 1."""
+    from wl_enclave import cli
+
+    bundle = tmp_path / "bundle"
+    chain = evidence.ChainWriter(bundle)
+    chain.append("run.open", {"purpose": "t"})
+    chain.append("run.close", {"exit_code": 0})
+    chain.seal({"agent": "t"})
+
+    args = argparse.Namespace(bundle=str(bundle))
+    assert cli._cmd_verify(args) == 0
+
+    # Edit a record: the chain no longer verifies.
+    path = bundle / evidence.CHAIN_FILE
+    lines = path.read_text().splitlines()
+    edited = json.loads(lines[0])
+    edited["data"]["purpose"] = "something else"
+    lines[0] = json.dumps(edited, sort_keys=True, separators=(",", ":"))
+    path.write_text("\n".join(lines) + "\n")
+
+    assert cli._cmd_verify(args) == 1

@@ -71,7 +71,20 @@ asked to wire money but not that it tried to reach an unlisted host; the guard
 knows the reverse. A bundle is worth having because it holds both.
 
 The same `policy:` bundle feeds both layers, so the authority rules and the
-sandbox's network rules cannot drift apart.
+sandbox's network rules cannot drift apart. The bundle records a hash of that
+file and of `enclave.yaml`, so two runs held to different rules cannot read as
+two runs held to the same rules.
+
+Each attested control says how its state was established, because "configured"
+and "confirmed in force" are different claims and a bundle that cannot tell
+them apart invites a reviewer to assume the stronger one. `verify` reports the
+weakest claim any layer made, and distinguishes a chain that does not verify
+(`FAILED`) from a chain that verifies and reports that isolation slipped
+(`UNCONTAINED`) from one that is true but missing something (`INCOMPLETE`).
+
+Bundles are not yet signed, so a bundle proves the chain is internally
+consistent, not who produced it — `verify` says so on every run rather than
+letting you assume otherwise.
 
 ## Repository layout
 
