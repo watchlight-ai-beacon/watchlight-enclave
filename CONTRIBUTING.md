@@ -81,13 +81,17 @@ diff covers what.
 
 ## Review
 
-CI must be green — with one documented exception. The **end to end** job is red
-right now and is not a required check, because it is reporting a real bug
-([#22]): the sandbox is attested after the agent has already run, so on a fast
-host the mask cannot be confirmed from inside. It is left failing rather than
-marked `continue-on-error`, because masking a job that reports a real gap is
-the same mistake as a bundle that looks complete while omitting records. If you
-make it pass, make sure you fixed the ordering rather than the assertion.
+CI must be green — with one documented exception. The **end to end** job is
+flaky and is not a required check, because it is reporting a real race ([#22]):
+the sandbox is attested after the agent has started, so whether the evidence
+mask can be confirmed from inside depends on whether the agent is still alive
+when we probe. It passes when attestation wins and fails when it loses.
+
+It is excluded rather than masked with `continue-on-error`, because hiding a
+job that reports a real gap is the same mistake as a bundle that looks complete
+while omitting records. **If you see it pass, that is not evidence the race is
+gone** — and if you make it pass reliably, make sure you fixed the ordering
+rather than the assertion.
 
 [#22]: https://github.com/watchlight-ai-beacon/watchlight-enclave/issues/22
  Beyond that, the questions a reviewer will actually ask:

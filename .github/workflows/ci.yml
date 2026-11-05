@@ -64,14 +64,15 @@ jobs:
 
   e2e:
     name: end to end
-    # Currently RED, on purpose, and deliberately not a required check on main.
-    # It is reporting a real bug: the sandbox is attested after the agent has
-    # run, and on a fast host after it has exited, so the mask cannot be
-    # confirmed from inside. See #22.
+    # FLAKY, and deliberately not a required check on main. It is reporting a
+    # real race (#22): the sandbox is attested after the agent has started, so
+    # whether the mask can be confirmed from inside depends on whether the
+    # agent is still alive when we probe it. It passes when attestation wins.
     #
-    # Not marked continue-on-error. Masking a job that is reporting a real gap
+    # Excluded rather than masked with continue-on-error. A flaky *required*
+    # check blocks merges at random, and hiding a job that reports a real gap
     # is the same mistake as a bundle that looks complete while omitting
-    # records, which is the one thing this project claims not to do.
+    # records. When #22 lands this becomes deterministic and required.
     # The one job that tests the product rather than its parts: a real
     # sandbox, a real guard, real egress, and an evidence bundle verified
     # offline. Needs Docker, so Linux only — macOS runners have no nested
