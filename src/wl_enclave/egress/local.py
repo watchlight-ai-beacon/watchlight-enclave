@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import attestation
+from ..drivers import nonroot_user
 from . import Allowlist, EgressEndpoint, GuardError
 
 #: What a guard of this shape can and cannot put in a record. Carried into the
@@ -205,6 +206,12 @@ class LocalEgressGuard:
                 "--env", f"WL_EGRESS_LISTEN=0.0.0.0:{GUARD_PORT}",
                 "--env", f"WL_EGRESS_ALLOW={','.join(allowlist.entries)}",
                 "--env", f"WL_EGRESS_RECORD={RECORD_IN_GUARD}",
+                # Unprivileged, and able to write the record file. The image
+                # declares USER 65532, which cannot write a bind mount owned
+                # by the invoking user — so on a native Linux host the guard
+                # died on startup with EACCES while passing on macOS, where
+                # the virtiofs layer maps ownership permissively.
+                "--user", nonroot_user(),
                 GUARD_IMAGE,
             )
             self._container = container

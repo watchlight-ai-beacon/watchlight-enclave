@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from types import SimpleNamespace
 import uuid
 from pathlib import Path
@@ -235,7 +236,10 @@ def test_a_sandbox_cannot_see_its_own_run_directory(tmp_path):
     )
     try:
         proc = subprocess.run(
-            [str(REPO / ".venv" / "bin" / "wl-enclave"), "-C", str(project),
+            # The interpreter running the tests, not a venv path: a
+            # hardcoded .venv exists on a developer machine and nowhere else,
+            # so this test could only ever have passed locally.
+            [sys.executable, "-m", "wl_enclave.cli", "-C", str(project),
              "run", "--purpose", "shadow regression"],
             capture_output=True, text=True, timeout=600,
         )
@@ -740,24 +744,66 @@ def test_a_missing_audit_file_is_not_an_error(tmp_path):
 
 # -- the sandbox never runs as root ---------------------------------------
 
-def test_the_sandbox_user_is_never_uid_zero(monkeypatch):
+def test_no_container_runs_as_uid_zero(monkeypatch):
     """Not left to the image.
 
     An image with no USER directive runs as uid 0, and most published base
     images have none — so this cannot be the image author's decision, who is
     frequently whoever we are trying to contain.
     """
-    from wl_enclave.drivers import docker as docker_driver
+    from wl_enclave import drivers
 
-    monkeypatch.setattr(docker_driver.os, "getuid", lambda: 501)
-    monkeypatch.setattr(docker_driver.os, "getgid", lambda: 20)
-    assert docker_driver._sandbox_user() == "501:20"
+    monkeypatch.setattr(drivers.os, "getuid", lambda: 501)
+    monkeypatch.setattr(drivers.os, "getgid", lambda: 20)
+    assert drivers.nonroot_user() == "501:20"
 
     # Mirroring the caller would put uid 0 in the container.
-    monkeypatch.setattr(docker_driver.os, "getuid", lambda: 0)
-    monkeypatch.setattr(docker_driver.os, "getgid", lambda: 0)
-    assert docker_driver._sandbox_user() == "65532:65532"
-    assert not docker_driver._sandbox_user().startswith("0:")
+    monkeypatch.setattr(drivers.os, "getuid", lambda: 0)
+    monkeypatch.setattr(drivers.os, "getgid", lambda: 0)
+    assert drivers.nonroot_user() == "65532:65532"
+    assert not drivers.nonroot_user().startswith("0:")
+
+
+def test_the_guard_runs_as_a_uid_that_can_write_its_record_file(monkeypatch):
+    """The guard image declares USER 65532, which cannot write a bind mount
+    owned by the invoking user.
+
+    This passed on macOS, where the virtiofs layer maps ownership
+    permissively, and died on a native Linux host with EACCES before the
+    guard had written anything. Our own CI found it.
+    """
+    from wl_enclave.egress import Allowlist, GuardError
+    from wl_enclave.egress.local import LocalEgressGuard
+
+    calls: list = []
+
+    def record(self, *args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(LocalEgressGuard, "_run", record)
+    monkeypatch.setattr(LocalEgressGuard, "_ensure_image", lambda self: None)
+    monkeypatch.setattr(LocalEgressGuard, "_await_listening", lambda self, *a, **k: None)
+
+    guard = LocalEgressGuard()
+    record = REPO / "runs" / "argv-probe.jsonl"
+    try:
+        guard.start("t", Allowlist(["example.com:443"]), record)
+    except GuardError:
+        # The mocked runtime returns empty output, so start() cannot complete.
+        # Narrow on purpose: a bare except here hid a TypeError in an earlier
+        # version of this test and left it asserting against a call list that
+        # never contained the container start at all.
+        pass
+    finally:
+        record.unlink(missing_ok=True)
+
+    # Several runtime calls happen; the one that matters is the container start.
+    started = [a for a in calls if a and a[0] == "run"]
+    assert started, f"the guard never started a container: {calls}"
+    argv = started[0]
+    assert "--user" in argv, f"the guard was started without --user: {argv}"
+    assert argv[argv.index("--user") + 1] != "0:0"
 
 
 def test_a_root_sandbox_is_reported_as_uncontained(monkeypatch):

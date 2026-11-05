@@ -34,33 +34,10 @@ from pathlib import Path
 from typing import Optional
 
 from .. import attestation
-from . import DriverError, Egress, Sandbox, SandboxSpec
+from . import DriverError, Egress, Sandbox, SandboxSpec, nonroot_user
 
 #: Ceiling on any single docker invocation that is not expected to block.
 _CALL_TIMEOUT = 60
-
-
-#: Used only when wl-enclave itself is running as root, where mirroring the
-#: caller would put uid 0 in the container. Matches the guard image's user.
-NONROOT_UID = 65532
-
-
-def _sandbox_user() -> str:
-    """The ``uid:gid`` the sandbox runs as. Never ``0``.
-
-    Mirrors the invoking user by default, because the workspace is a bind
-    mount owned by that user: a fixed unprivileged uid would be unable to
-    write the files the agent exists to produce. That makes "non-root" and
-    "can do its job" the same choice on a normal developer machine.
-
-    When wl-enclave is itself root, mirroring would defeat the point, so a
-    fixed unprivileged uid is used instead. Bind-mount ownership then needs
-    attention from whoever set that up — preflight says so.
-    """
-    uid, gid = os.getuid(), os.getgid()
-    if uid == 0:
-        return f"{NONROOT_UID}:{NONROOT_UID}"
-    return f"{uid}:{gid}"
 
 
 class DockerDriver:
@@ -182,7 +159,7 @@ class DockerDriver:
             # dropped, so root inside the container could not unmount the
             # evidence mask; that is a reason not to rely on it rather than a
             # reason to allow it.
-            "--user", _sandbox_user(),
+            "--user", nonroot_user(),
             # Ceilings, not security boundaries. They bound the damage a
             # runaway agent does to the host it shares with everything else.
             "--pids-limit", str(spec.pids),

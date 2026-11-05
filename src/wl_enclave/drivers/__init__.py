@@ -13,6 +13,8 @@ makes the isolation half of an evidence bundle worth anything.
 
 from __future__ import annotations
 
+import os
+
 import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +34,35 @@ __all__ = [
 class DriverError(Exception):
     """The runtime refused an operation, or is not usable on this machine."""
 
+
+#: Used only when wl-enclave itself runs as root, where mirroring the caller
+#: would hand the container uid 0. Matches the guard image's declared user.
+NONROOT_FALLBACK_UID = 65532
+
+
+def nonroot_user() -> str:
+    """The ``uid:gid`` a container runs as. Never ``0``.
+
+    Shared by the sandbox and the guard because they face the same problem
+    from opposite ends. Both must run unprivileged, and both write to a
+    directory bind-mounted from the host: the sandbox its workspace, the guard
+    its record file. On a bind mount the host's ownership is what the kernel
+    enforces, so a container running as a *fixed* unprivileged uid cannot
+    write files the invoking user owns — which is every file that matters here.
+
+    Mirroring the caller resolves it: unprivileged and able to write are the
+    same choice. The guard image still declares ``USER 65532`` so it is
+    unprivileged if run by hand, and this overrides it with a uid that can
+    actually reach the record file.
+
+    When wl-enclave is itself root, mirroring would put uid 0 in the
+    container, so a fixed unprivileged uid is used instead and bind-mount
+    ownership becomes the operator's problem.
+    """
+    uid, gid = os.getuid(), os.getgid()
+    if uid == 0:
+        return f"{NONROOT_FALLBACK_UID}:{NONROOT_FALLBACK_UID}"
+    return f"{uid}:{gid}"
 
 @dataclass(frozen=True)
 class Mount:
