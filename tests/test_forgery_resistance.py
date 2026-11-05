@@ -376,3 +376,71 @@ def test_a_record_missing_required_fields_is_counted_not_chained(tmp_path):
     records, account = runs.read_decisions(audit)
     assert len(records) == 1
     assert account["malformed"] == 2
+
+
+# -- the canary must catch a mask the runtime reports but does not apply ---
+
+@pytest.mark.skipif(
+    shutil.which("docker") is None, reason="needs a container runtime"
+)
+def test_a_mask_the_daemon_records_but_does_not_apply_is_caught():
+    """The case that proves configuration and effect are different questions.
+
+    A tmpfs destination of "/work/." is accepted by the daemon, reported
+    faithfully under HostConfig.Tmpfs, normalised onto the bind target, and
+    masks nothing — the bind wins silently with no error. Every check based on
+    the runtime's record of what was requested passes. Only reading a canary
+    from inside the sandbox catches it.
+
+    provision() now refuses this spec, so the container is created directly to
+    reach the detection path the refusal protects.
+    """
+    from wl_enclave.drivers import Sandbox
+    from wl_enclave.drivers.docker import DockerDriver
+
+    project = Path.home() / f".wl-canary-probe-{uuid.uuid4().hex[:8]}"
+    (project / "runs").mkdir(parents=True)
+    # Planted at the host path the mask "/work/." actually resolves to, which
+    # is the project root itself — the same derivation the driver makes.
+    canary = project / ".wl-mask-canary-test"
+    canary.write_text("this must not be readable from inside\n")
+    driver = DockerDriver()
+    container = ""
+    try:
+        proc = subprocess.run(
+            [
+                "docker", "run", "--detach", "--rm",
+                "--tmpfs", "/work/.:rw,noexec,nosuid,size=1m",
+                "--mount", f"type=bind,src={project.resolve()},dst=/work",
+                "python:3.12-slim", "sleep", "30",
+            ],
+            capture_output=True, text=True, timeout=180,
+        )
+        if proc.returncode != 0:
+            pytest.skip(f"could not create the probe container: {proc.stderr.strip()}")
+        container = proc.stdout.strip()
+        sandbox = Sandbox(id=container, name="probe", driver="docker")
+
+        # What the runtime reports, and what is actually in force, disagree.
+        inspected = json.loads(
+            subprocess.run(
+                ["docker", "inspect", container],
+                capture_output=True, text=True, timeout=60,
+            ).stdout
+        )[0]
+        tmpfs = (inspected.get("HostConfig") or {}).get("Tmpfs") or {}
+        assert "/work/." in tmpfs, "the daemon did record the mask as requested"
+
+        driver._masks[container] = ["/work/."]
+        driver._canaries[container] = {"/work/./.wl-mask-canary-test": canary}
+        control = driver._mask_control(sandbox, ["/work/."], [])
+
+        assert control["in_force"] is False, control
+        assert control["verified_by"] == "runtime_readback"
+        assert "canary" in control["detail"]
+    finally:
+        if container:
+            subprocess.run(
+                ["docker", "kill", container], capture_output=True, timeout=60
+            )
+        shutil.rmtree(project, ignore_errors=True)

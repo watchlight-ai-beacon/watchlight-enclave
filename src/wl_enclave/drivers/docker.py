@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import posixpath
+import secrets
 import shutil
 import subprocess
 from pathlib import Path
@@ -44,6 +45,9 @@ class DockerDriver:
     def __init__(self, binary: str = "docker") -> None:
         #: Masks declared per sandbox, keyed by container id.
         self._masks: dict[str, list[str]] = {}
+        #: Canary files planted behind those masks: in-container path -> host
+        #: path. Read back in attest() and removed there.
+        self._canaries: dict[str, dict[str, Path]] = {}
         self.name = binary
         self._bin = binary
 
@@ -202,7 +206,61 @@ class DockerDriver:
         # mask this driver applied came back. Without it the attestation can
         # only report what tmpfs mounts exist, which is not the same question.
         self._masks[container_id] = declared_masks
+        self._canaries[container_id] = self._plant_canaries(spec, declared_masks)
         return Sandbox(id=container_id, name=spec.name, driver=self.name)
+
+    def _plant_canaries(
+        self, spec: SandboxSpec, masks: list[str]
+    ) -> dict[str, Path]:
+        """Put a file on the host behind each mask, so the mask can be tested.
+
+        A mask is a tmpfs mounted *over* a path inside a bind mount, so the
+        host file underneath it is exactly what the sandbox must not be able to
+        read. Planting one and failing to read it back is a test of the mask's
+        effect; everything else available to us tests only its configuration,
+        and the two came apart in practice — the daemon accepted a destination
+        of ``/work/.``, reported it faithfully under ``HostConfig.Tmpfs``, and
+        mounted nothing useful.
+
+        Written after the container starts, which is fine: the tmpfs covers
+        the path whenever the file underneath it appears.
+        """
+        planted: dict[str, Path] = {}
+        for mask in masks:
+            host_path = self._host_path_behind(spec, mask)
+            if host_path is None:
+                continue
+            canary = host_path / f".wl-mask-canary-{secrets.token_hex(8)}"
+            try:
+                host_path.mkdir(parents=True, exist_ok=True)
+                canary.write_text(
+                    "If an agent can read this, the mask over its own run "
+                    "directory is not in force.\n"
+                )
+            except OSError:
+                # Not fatal. An unplanted canary means the control reports
+                # "could not be confirmed", which is the honest answer.
+                continue
+            planted[posixpath.join(mask, canary.name)] = canary
+        return planted
+
+    @staticmethod
+    def _host_path_behind(spec: SandboxSpec, mask: str) -> Optional[Path]:
+        """The host directory a masked in-container path resolves to.
+
+        provision() has already established that every mask sits strictly
+        below a mount target, so the longest matching target is the one the
+        mask is nested in.
+        """
+        best: Optional[tuple[int, Path, str]] = None
+        for mount in spec.mounts:
+            target = posixpath.normpath(mount.target)
+            if mask.startswith(target + "/") and (best is None or len(target) > best[0]):
+                best = (len(target), mount.source, target)
+        if best is None:
+            return None
+        _, source, target = best
+        return Path(source).resolve() / posixpath.relpath(mask, target)
 
     def attest(self, sandbox: Sandbox) -> dict:
         """Read the sandbox's actual constraints back out of the runtime.
@@ -303,13 +361,105 @@ class DockerDriver:
             # the daemon normalises a destination after making it. Confirming
             # the mask against the container's own mount table is the stronger
             # claim and is not made here.
-            attestation.EVIDENCE_MASKED: attestation.control(
-                (not missing) if declared else None,
-                attestation.RUNTIME_CONFIG,
-                ("declared but absent: " + ", ".join(missing)) if missing
-                else ("" if declared else "no masks were declared for this run"),
-            ),
+            attestation.EVIDENCE_MASKED: self._mask_control(sandbox, declared, missing),
         }
+
+    def _mask_control(
+        self, sandbox: Sandbox, declared: list[str], missing: list[str]
+    ) -> dict:
+        """Whether the masks are in force, observed from inside the sandbox.
+
+        Three questions, in increasing strength, and the answer is the weakest
+        one that still applies. Did the daemon record the mask? Does the
+        container's own mount table show a tmpfs there? And can the sandbox
+        read a file planted on the host behind it?
+
+        The last is the one that matters, because the first two describe
+        configuration and only this describes effect. They came apart in
+        practice: a destination of ``/work/.`` was accepted by the daemon,
+        reported faithfully under ``HostConfig.Tmpfs``, and masked nothing.
+        """
+        if not declared:
+            return attestation.control(
+                None, attestation.RUNTIME_CONFIG,
+                "no masks were declared for this run",
+            )
+        if missing:
+            return attestation.control(
+                False, attestation.RUNTIME_CONFIG,
+                "declared but absent from the runtime's record: "
+                + ", ".join(missing),
+            )
+
+        canaries = self._canaries.get(sandbox.id) or {}
+        readable = []
+        unreadable = []
+        for in_container, host_path in canaries.items():
+            probe = self._run(
+                "exec", sandbox.id, "cat", in_container, check=False, timeout=30
+            )
+            if probe.returncode == 0:
+                readable.append(in_container)
+            else:
+                unreadable.append(in_container)
+            try:
+                host_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._canaries.pop(sandbox.id, None)
+
+        if readable:
+            # The critical case. The sandbox read a file that the mask exists
+            # to hide, which means it could reach its own evidence.
+            return attestation.control(
+                False, attestation.READBACK,
+                "the sandbox read a canary planted behind the mask at "
+                + ", ".join(readable),
+            )
+
+        mounts = self._run(
+            "exec", sandbox.id, "cat", "/proc/mounts", check=False, timeout=30
+        )
+        mounted = []
+        if mounts.returncode == 0:
+            for line in mounts.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and parts[2] == "tmpfs":
+                    mounted.append(parts[1])
+
+        if not unreadable:
+            # No canary could be planted or read back, so nothing was actually
+            # observed from inside. Say that rather than imply an observation.
+            return attestation.control(
+                None, attestation.RUNTIME_CONFIG,
+                "present in the runtime's record; not confirmed from inside "
+                "the sandbox (no canary could be read back)",
+            )
+
+        # Compared in normalised form because the kernel records the mount
+        # point normalised while HostConfig keeps the string as given.
+        mounted_norm = {posixpath.normpath(m) for m in mounted}
+        unmounted = [m for m in declared if posixpath.normpath(m) not in mounted_norm]
+        if mounts.returncode != 0:
+            detail = (
+                "a canary planted behind every mask was unreadable from "
+                "inside the sandbox; the mount table could not be read"
+            )
+        elif unmounted:
+            # The canary is hidden but no tmpfs is mounted where we asked, so
+            # something other than our mask is doing the hiding.
+            return attestation.control(
+                None, attestation.READBACK,
+                "the canary was unreadable, but the sandbox's mount table "
+                "shows no tmpfs at " + ", ".join(unmounted),
+            )
+        else:
+            detail = (
+                "a tmpfs is mounted at every declared path in the sandbox's "
+                "own mount table, and a canary planted behind each one was "
+                "unreadable from inside"
+            )
+        return attestation.control(True, attestation.READBACK, detail)
 
     def wait(self, sandbox: Sandbox, timeout_seconds: int) -> Optional[int]:
         """Block until the sandbox exits; ``None`` if it outlived the timeout."""
