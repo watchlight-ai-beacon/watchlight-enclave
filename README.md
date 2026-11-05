@@ -252,7 +252,7 @@ changed.
 
 ## Contributing
 
-Conventions follow the
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Conventions follow the
 [Watchlight Developer Edition repo](https://github.com/watchlight-ai-beacon/watchlight-de):
 conventional commit subjects (`fix:`, `docs:`, `feat:`, `!` for breaking), and
 every commit signed off under the

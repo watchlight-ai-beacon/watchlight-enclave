@@ -64,6 +64,14 @@ jobs:
 
   e2e:
     name: end to end
+    # Currently RED, on purpose, and deliberately not a required check on main.
+    # It is reporting a real bug: the sandbox is attested after the agent has
+    # run, and on a fast host after it has exited, so the mask cannot be
+    # confirmed from inside. See #22.
+    #
+    # Not marked continue-on-error. Masking a job that is reporting a real gap
+    # is the same mistake as a bundle that looks complete while omitting
+    # records, which is the one thing this project claims not to do.
     # The one job that tests the product rather than its parts: a real
     # sandbox, a real guard, real egress, and an evidence bundle verified
     # offline. Needs Docker, so Linux only — macOS runners have no nested
