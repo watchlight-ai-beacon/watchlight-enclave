@@ -25,6 +25,7 @@ OpenShell's own audit stream.
 from __future__ import annotations
 
 import json
+import os
 import posixpath
 import secrets
 import shutil
@@ -37,6 +38,29 @@ from . import DriverError, Egress, Sandbox, SandboxSpec
 
 #: Ceiling on any single docker invocation that is not expected to block.
 _CALL_TIMEOUT = 60
+
+
+#: Used only when wl-enclave itself is running as root, where mirroring the
+#: caller would put uid 0 in the container. Matches the guard image's user.
+NONROOT_UID = 65532
+
+
+def _sandbox_user() -> str:
+    """The ``uid:gid`` the sandbox runs as. Never ``0``.
+
+    Mirrors the invoking user by default, because the workspace is a bind
+    mount owned by that user: a fixed unprivileged uid would be unable to
+    write the files the agent exists to produce. That makes "non-root" and
+    "can do its job" the same choice on a normal developer machine.
+
+    When wl-enclave is itself root, mirroring would defeat the point, so a
+    fixed unprivileged uid is used instead. Bind-mount ownership then needs
+    attention from whoever set that up — preflight says so.
+    """
+    uid, gid = os.getuid(), os.getgid()
+    if uid == 0:
+        return f"{NONROOT_UID}:{NONROOT_UID}"
+    return f"{uid}:{gid}"
 
 
 class DockerDriver:
@@ -151,6 +175,14 @@ class DockerDriver:
             "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
+            # Never root, whatever the image says. An image without a USER
+            # directive runs as uid 0, and most published base images have
+            # none — so this cannot be left to the image author, who is often
+            # whoever we are trying to contain. Capabilities are already
+            # dropped, so root inside the container could not unmount the
+            # evidence mask; that is a reason not to rely on it rather than a
+            # reason to allow it.
+            "--user", _sandbox_user(),
             # Ceilings, not security boundaries. They bound the damage a
             # runaway agent does to the host it shares with everything else.
             "--pids-limit", str(spec.pids),
@@ -363,6 +395,7 @@ class DockerDriver:
             # the daemon normalises a destination after making it. Confirming
             # the mask against the container's own mount table is the stronger
             # claim and is not made here.
+            attestation.RUNS_AS_NON_ROOT: self._user_control(sandbox, inspected),
             attestation.EVIDENCE_MASKED: self._mask_control(sandbox, declared, missing),
             **self._network_control(inspected, intent),
         }
@@ -397,6 +430,41 @@ class DockerDriver:
                 True, attestation.RUNTIME_CONFIG, f"only {intent.network}"
             )
         }
+
+    def _user_control(self, sandbox: Sandbox, inspected: dict) -> dict:
+        """Whether the agent's process is actually non-root.
+
+        Read from inside, not from the config. ``Config.User`` says what the
+        container was asked to run as, and an entrypoint is free to change
+        uid afterwards if it has the means. ``id -u`` is the answer to the
+        question a reviewer is asking.
+
+        Falls back to the runtime's record when the sandbox cannot be probed,
+        at the weaker provenance that record deserves, rather than reporting
+        nothing — a control absent from a bundle reads as a gap.
+        """
+        probe = self._run(
+            "exec", sandbox.id, "id", "-u", check=False, timeout=30
+        )
+        if probe.returncode == 0:
+            uid = probe.stdout.strip()
+            if uid.isdigit():
+                return attestation.control(
+                    uid != "0", attestation.READBACK,
+                    f"the agent process runs as uid {uid}",
+                )
+        configured = (inspected.get("Config") or {}).get("User") or ""
+        if not configured:
+            return attestation.control(
+                None, attestation.RUNTIME_CONFIG,
+                "the sandbox could not be probed and the runtime records no "
+                "user, which for most images means uid 0",
+            )
+        return attestation.control(
+            not configured.startswith("0"), attestation.RUNTIME_CONFIG,
+            f"the sandbox could not be probed; the runtime was asked for "
+            f"user {configured!r}",
+        )
 
     def _mask_control(
         self, sandbox: Sandbox, declared: list[str], missing: list[str]

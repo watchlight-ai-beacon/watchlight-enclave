@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from wl_enclave import evidence, runs
+from wl_enclave import attestation, evidence, runs
 from wl_enclave.cli import _mask_for_runs
 from wl_enclave.egress import EGRESS_UNRECOGNISED, GUARD_RECORD_TYPES
 
@@ -736,3 +736,47 @@ def test_a_missing_audit_file_is_not_an_error(tmp_path):
     records, account = runs.read_decisions(tmp_path / "nope.jsonl")
     assert records == []
     assert account["rejected_not_a_regular_file"] == 0
+
+
+# -- the sandbox never runs as root ---------------------------------------
+
+def test_the_sandbox_user_is_never_uid_zero(monkeypatch):
+    """Not left to the image.
+
+    An image with no USER directive runs as uid 0, and most published base
+    images have none — so this cannot be the image author's decision, who is
+    frequently whoever we are trying to contain.
+    """
+    from wl_enclave.drivers import docker as docker_driver
+
+    monkeypatch.setattr(docker_driver.os, "getuid", lambda: 501)
+    monkeypatch.setattr(docker_driver.os, "getgid", lambda: 20)
+    assert docker_driver._sandbox_user() == "501:20"
+
+    # Mirroring the caller would put uid 0 in the container.
+    monkeypatch.setattr(docker_driver.os, "getuid", lambda: 0)
+    monkeypatch.setattr(docker_driver.os, "getgid", lambda: 0)
+    assert docker_driver._sandbox_user() == "65532:65532"
+    assert not docker_driver._sandbox_user().startswith("0:")
+
+
+def test_a_root_sandbox_is_reported_as_uncontained(monkeypatch):
+    """Read from inside, because Config.User is what was asked for.
+
+    An entrypoint with the means can change uid after start, so `id -u` is the
+    answer to the question a reviewer is actually asking.
+    """
+    from wl_enclave.drivers import Sandbox
+    from wl_enclave.drivers.docker import DockerDriver
+
+    driver = DockerDriver()
+    sandbox = Sandbox(id="c", name="probe", driver="docker")
+    monkeypatch.setattr(
+        DockerDriver, "_run",
+        lambda self, *a, **k: SimpleNamespace(returncode=0, stdout="0\n", stderr=""),
+    )
+    control = driver._user_control(sandbox, {})
+
+    assert control["in_force"] is False
+    assert control["verified_by"] == "runtime_readback"
+    assert attestation.claim_of("runs_as_non_root") == attestation.CONTAINMENT

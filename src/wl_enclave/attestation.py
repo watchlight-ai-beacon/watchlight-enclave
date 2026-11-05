@@ -51,6 +51,7 @@ __all__ = [
     "ROOTFS_READ_ONLY",
     "CAPABILITIES_DROPPED",
     "NO_NEW_PRIVILEGES",
+    "RUNS_AS_NON_ROOT",
     "EVIDENCE_MASKED",
     "control",
     "merge",
@@ -95,6 +96,7 @@ GUARD_LIVE = "guard_live_at_readback"
 ROOTFS_READ_ONLY = "rootfs_read_only"
 CAPABILITIES_DROPPED = "capabilities_dropped"
 NO_NEW_PRIVILEGES = "no_new_privileges"
+RUNS_AS_NON_ROOT = "runs_as_non_root"
 EVIDENCE_MASKED = "evidence_masked_from_sandbox"
 
 
@@ -135,6 +137,7 @@ _CLAIM = {
     ROOTFS_READ_ONLY: CONTAINMENT,
     CAPABILITIES_DROPPED: CONTAINMENT,
     NO_NEW_PRIVILEGES: CONTAINMENT,
+    RUNS_AS_NON_ROOT: CONTAINMENT,
     EVIDENCE_MASKED: CONTAINMENT,
     GUARD_ATTACHED: WITNESSING,
     GUARD_HAS_EGRESS: WITNESSING,

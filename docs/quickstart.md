@@ -315,10 +315,9 @@ only one match.
 
 ## Next
 
-- [`docs/design/`](design/README.md) — how Enclave is built and why: the trust
-  boundaries, what the evidence chain does and does not prove, how each
-  attested control records the strength of its own evidence, and what a second
-  runtime driver has to deliver.
+- [`docs/design/`](design/README.md) — the design notes. What a bundle
+  actually proves, why your bundle says `incomplete`, what stops the agent
+  editing its own evidence, and what to know before writing a driver.
 - [`examples/coder`](../examples/coder/README.md) — the misbehaving agent from
   this guide, with a note on which layer stops each of its five attempts and
   some suggestions for breaking it on purpose, including breaking the

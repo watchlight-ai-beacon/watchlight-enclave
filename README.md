@@ -41,30 +41,55 @@ See [`docs/quickstart.md`](docs/quickstart.md).
 ## How it fits together
 
 ```text
-  wl-enclave run
-        |
-        +-- RuntimeDriver ....... Docker today; Podman and OpenShell next
-        |
-        +-- internal network .... no route anywhere except the guard
-              |
-   +----------+-----------------------------+
-   |                                        |
-   |   SANDBOX                          EGRESS GUARD
-   |   no network of its own            CONNECT allowlist
-   |   read-only root                   refuses private ranges
-   |   every capability dropped         and 169.254.169.254
-   |                                        |
-   |   agent                                +--> upstream, if allowed
-   |     |                                  |
-   |     +-- @govern.tool(intent=...)       +--> egress.attempt record
-   |           |
-   |           +--> allow / deny ---------> decision record
-   +----------------------------------------+
-                        |
-                        v
-              hash-chained evidence bundle
-              wl-enclave verify, offline
+                              YOUR MACHINE
+┌──────────────────────────────────────────────────────────────────────┐
+│                                                                      │
+│ ┌────────────────────────────┐        ┌────────────────────────────┐ │
+│ │ SANDBOX                    │        │ EGRESS GUARD               │ │
+│ │                            │        │                            │ │
+│ │ non-root uid               │        │ uid 65532                  │ │
+│ │ read-only root             │        │ CONNECT allowlist          │ │
+│ │ all capabilities dropped   │        │ refuses private ranges,    │ │
+│ │ no-new-privileges          │        │ link-local, NAT64, and     │ │
+│ │ tmpfs over its own runs/   │        │ 169.254.169.254            │ │
+│ │                            │        │                            │ │
+│ │  agent                     │        │ records the attempt BEFORE │ │
+│ │    │                       │        │ forwarding. If it cannot   │ │
+│ │    ├─ @govern.tool(...)    │        │ record, it refuses.        │ │
+│ │    │                       │        │                            │ │
+│ │    └─ CONNECT ═════════════╪═══════▶│ ───────────────▶ upstream  │ │
+│ └─────────┬──────────────────┘        └──────────┬─────────────────┘ │
+│           │                                      │                   │
+│    decision records                       egress.attempt             │
+│           │                                + bytes each way          │
+│           ▼                                      ▼                   │
+│   runs/<id>/evidence/                    runs/<id>/guard/            │
+│   the agent writes here —                never mounted into          │
+│   the ONLY path it can                   the sandbox                 │
+│   influence                                      │                   │
+│           └──────────────────┬───────────────────┘                   │
+│                              ▼                                       │
+│               runs/<id>/bundle/chain.jsonl                           │
+│               each record hashed over the one before it              │
+│                                                                      │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               ▼
+                       wl-enclave verify
+            offline — no account, no network, not even Watchlight
+
+  ═══  the sandbox has no route out except the guard (docker --internal)
+  ───  a line in the evidence bundle
 ```
+
+**Read it as two independent witnesses.** The left box knows the agent asked to
+wire money. The right box knows it tried to reach an unlisted host. Neither can
+be derived from the other, and a bundle is worth having because it holds both.
+
+**The `═══` lines are the ones that matter.** Proxy environment variables are a
+convenience for the agent, not a control — an agent that ignores them finds no
+route rather than a bypass. If the route were the convenience and the variables
+the control, an agent could simply not read them.
+
 
 Two layers, and neither can answer for the other. Watchlight knows the agent
 asked to wire money but not that it tried to reach an unlisted host; the guard
@@ -95,7 +120,7 @@ letting you assume otherwise.
 | `src/wl_enclave/egress/` | egress guards behind one `EgressGuard` protocol |
 | `crates/wl-enclave-egress/` | the guard itself: a CONNECT allowlist in Rust |
 | `docs/` | quickstart and reference |
-| `docs/design/` | how it is built and why: trust boundaries, evidence, attestation, egress, drivers, limits |
+| `docs/design/` | design notes — what a bundle proves, trust boundaries, the control vocabulary, egress coverage, writing a driver |
 | `examples/` | runnable agents with policies |
 
 ## Open source, and the license

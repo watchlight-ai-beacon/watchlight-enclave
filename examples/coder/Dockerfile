@@ -14,3 +14,9 @@ RUN pip install --no-cache-dir --upgrade "pip==25.3" \
  && pip install --no-cache-dir "watchlight==0.15.0"
 
 WORKDIR /work
+
+# Declared so the image is honest about what it needs, even though the driver
+# forces a non-root uid regardless: an image that only works as root would
+# fail confusingly rather than obviously. wl-enclave runs the sandbox as the
+# invoking user, so the uid here is a floor, not the uid you will see.
+USER 65532:65532
