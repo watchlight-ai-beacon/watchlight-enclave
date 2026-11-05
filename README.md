@@ -242,6 +242,14 @@ claims and we won't blur them. That discussion is in the open, in issues
 Want the engine source, an air-gapped build, or to govern a fleet in
 production? [email sales@watchlight.ai](mailto:sales@watchlight.ai?subject=Watchlight%20AI%20Enclave).
 
+## Changelog
+
+[`CHANGELOG.md`](CHANGELOG.md), which also explains the three contracts this
+project versions separately — the CLI surface, how strictly `verify` reads a
+bundle, and the bundle format itself. The second one is the one that will catch
+you out: a stricter verifier breaks a CI gate even when the format has not
+changed.
+
 ## Contributing
 
 Conventions follow the

@@ -1,0 +1,25 @@
+# Pinned action SHAs stop third-party code changing under CI, but a pin left
+# alone becomes a stale dependency. Dependabot raises the bump as a reviewable
+# PR, which is the trade we want: no silent change, no silent staleness.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore"
+
+  - package-ecosystem: cargo
+    directory: /crates/wl-enclave-egress
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore"
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore"

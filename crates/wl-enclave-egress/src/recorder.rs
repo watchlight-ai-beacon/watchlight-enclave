@@ -231,9 +231,7 @@ impl Recorder {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if state.suppressed == 0
-            && state.refused == state.refused_noted
-            && state.write_errors == 0
+        if state.suppressed == 0 && state.refused == state.refused_noted && state.write_errors == 0
         {
             return;
         }
@@ -266,8 +264,7 @@ impl Recorder {
             state.window_start = Instant::now();
             state.window_count = 0;
         }
-        let over_budget =
-            state.written >= MAX_RECORDS || state.window_count >= MAX_PER_SECOND;
+        let over_budget = state.written >= MAX_RECORDS || state.window_count >= MAX_PER_SECOND;
         if over_budget {
             state.suppressed += 1;
             if state.suppression_noted {
@@ -309,6 +306,33 @@ impl Recorder {
         state.window_count += 1;
         state.written += 1;
         true
+    }
+
+    /// Record a closed tunnel: how much crossed it, for how long, and why it
+    /// ended. Volume is the first question after a suspected exfiltration.
+    pub fn tunnel(
+        &self,
+        host: &str,
+        port: u16,
+        bytes_sent: u64,
+        bytes_received: u64,
+        duration_ms: u64,
+        outcome: &str,
+    ) {
+        // The result is deliberately discarded: the bytes have already
+        // crossed, so refusing now would protect nothing. A dropped tunnel
+        // record still shows up as a suppression note, which is what tells a
+        // reviewer the volume figures are incomplete.
+        let _ = self.write(serde_json::json!({
+            "ts": iso8601_now(),
+            "event": "egress.tunnel",
+            "host": sanitize(host),
+            "port": port,
+            "bytes_sent": bytes_sent,
+            "bytes_received": bytes_received,
+            "duration_ms": duration_ms,
+            "outcome": outcome,
+        }));
     }
 }
 
@@ -463,8 +487,7 @@ mod tests {
 
     /// A fresh directory per test, named so two tests cannot collide.
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("wl-rec-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("wl-rec-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("egress.jsonl");
         let _ = std::fs::remove_file(&path);
@@ -479,10 +502,21 @@ mod tests {
         let rec = Recorder::create(&path).unwrap();
 
         assert!(rec.attempt(
-            "example.com", 443, true, "allowlisted", "connect",
+            "example.com",
+            443,
+            true,
+            "allowlisted",
+            "connect",
             Some("203.0.113.7".parse().unwrap()),
         ));
-        assert!(rec.attempt("blocked.test", 443, false, "not allowlisted", "connect", None));
+        assert!(rec.attempt(
+            "blocked.test",
+            443,
+            false,
+            "not allowlisted",
+            "connect",
+            None
+        ));
 
         let body = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = body.lines().collect();
@@ -531,7 +565,6 @@ mod tests {
         );
     }
 
-
     #[test]
     #[cfg(target_os = "linux")]
     fn a_record_that_does_not_reach_the_file_reports_failure() {
@@ -551,35 +584,5 @@ mod tests {
             "an attempt whose record could not be written must report failure, \
              so the caller refuses the connection instead of forwarding it"
         );
-    }
-
-}
-
-impl Recorder {
-    /// Record a closed tunnel: how much crossed it, for how long, and why it
-    /// ended. Volume is the first question after a suspected exfiltration.
-    pub fn tunnel(
-        &self,
-        host: &str,
-        port: u16,
-        bytes_sent: u64,
-        bytes_received: u64,
-        duration_ms: u64,
-        outcome: &str,
-    ) {
-        // The result is deliberately discarded: the bytes have already
-        // crossed, so refusing now would protect nothing. A dropped tunnel
-        // record still shows up as a suppression note, which is what tells a
-        // reviewer the volume figures are incomplete.
-        let _ = self.write(serde_json::json!({
-            "ts": iso8601_now(),
-            "event": "egress.tunnel",
-            "host": sanitize(host),
-            "port": port,
-            "bytes_sent": bytes_sent,
-            "bytes_received": bytes_received,
-            "duration_ms": duration_ms,
-            "outcome": outcome,
-        }));
     }
 }

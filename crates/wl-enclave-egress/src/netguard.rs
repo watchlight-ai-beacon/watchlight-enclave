@@ -132,9 +132,7 @@ fn check_v6(ip: Ipv6Addr) -> Result<(), Refusal> {
     //
     // Judged by the v4 rules, because that is where the packet ends up.
     let v4_compatible = segments[0..6] == [0, 0, 0, 0, 0, 0] && !ip.is_unspecified();
-    let nat64 = segments[0] == 0x0064
-        && segments[1] == 0xff9b
-        && segments[2..6] == [0, 0, 0, 0];
+    let nat64 = segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6] == [0, 0, 0, 0];
     if v4_compatible || nat64 {
         let embedded = Ipv4Addr::new(
             (segments[6] >> 8) as u8,
@@ -240,11 +238,11 @@ mod tests {
         // revisited, so the default is deny rather than allow.
         assert_eq!(refused("fec0::1"), Refusal::Private); // deprecated site-local
         assert_eq!(refused("100::1"), Refusal::Reserved); // discard-only
-        // Note 3ffe::/16 (the former 6bone) is NOT caught here: it sits inside
-        // 2000::/3, so a default-deny on non-global-unicast does not reach it.
-        // Left alone rather than special-cased — the prefix is unassigned, not
-        // infrastructure, so it is not a path to anything.
-        // ...and a genuine public address still passes.
+                                                          // Note 3ffe::/16 (the former 6bone) is NOT caught here: it sits inside
+                                                          // 2000::/3, so a default-deny on non-global-unicast does not reach it.
+                                                          // Left alone rather than special-cased — the prefix is unassigned, not
+                                                          // infrastructure, so it is not a path to anything.
+                                                          // ...and a genuine public address still passes.
         assert!(check("2606:4700:4700::1111".parse().unwrap()).is_ok());
     }
 
@@ -262,10 +260,7 @@ mod tests {
             "64:ff9b::0.0.0.2",
             "::ffff:0.0.0.2",
         ] {
-            assert!(
-                check(ip.parse().unwrap()).is_err(),
-                "{ip} must be refused"
-            );
+            assert!(check(ip.parse().unwrap()).is_err(), "{ip} must be refused");
         }
     }
 
@@ -278,7 +273,7 @@ mod tests {
         assert_eq!(refused("2001:2::1"), Refusal::Reserved); // benchmarking
         assert_eq!(refused("2001:db8::1"), Refusal::Reserved); // documentation
         assert_eq!(refused("2001::1"), Refusal::Reserved); // Teredo
-        // 2001:200::/23 onward is ordinary allocated space.
+                                                           // 2001:200::/23 onward is ordinary allocated space.
         assert!(check("2001:200::1".parse().unwrap()).is_ok());
     }
 

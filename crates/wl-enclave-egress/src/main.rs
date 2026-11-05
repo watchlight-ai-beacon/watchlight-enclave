@@ -253,11 +253,7 @@ async fn shutdown_signal() {
 }
 
 /// Serve one client connection.
-async fn serve(
-    guard: Arc<Guard>,
-    mut client: TcpStream,
-    _peer: SocketAddr,
-) -> std::io::Result<()> {
+async fn serve(guard: Arc<Guard>, mut client: TcpStream, _peer: SocketAddr) -> std::io::Result<()> {
     let head = match timeout(HEAD_TIMEOUT, read_head(&mut client)).await {
         Ok(Ok(head)) => head,
         Ok(Err(err)) => {
@@ -289,24 +285,39 @@ async fn serve(
         // mean parsing and rewriting attacker-controlled requests for no
         // evidentiary gain, since an agent that wants to be governed can use
         // TLS. Refusing is the smaller attack surface.
-        let _ = guard
-            .recorder
-            .attempt(target, 0, false, "non-CONNECT request refused", "http", None);
+        let _ = guard.recorder.attempt(
+            target,
+            0,
+            false,
+            "non-CONNECT request refused",
+            "http",
+            None,
+        );
         return respond(&mut client, 405, "Method Not Allowed").await;
     }
 
     // Authority-form requires an explicit port. Guessing one would mean the
     // record said a port the client never asked for.
     let Some((host, port)) = target.rsplit_once(':') else {
-        let _ = guard
-            .recorder
-            .attempt(target, 0, false, "CONNECT target is not host:port", "connect", None);
+        let _ = guard.recorder.attempt(
+            target,
+            0,
+            false,
+            "CONNECT target is not host:port",
+            "connect",
+            None,
+        );
         return respond(&mut client, 400, "Bad Request").await;
     };
     let Ok(port) = port.parse::<u16>() else {
-        let _ = guard
-            .recorder
-            .attempt(host, 0, false, "CONNECT port is not a number", "connect", None);
+        let _ = guard.recorder.attempt(
+            host,
+            0,
+            false,
+            "CONNECT port is not a number",
+            "connect",
+            None,
+        );
         return respond(&mut client, 400, "Bad Request").await;
     };
     let host = host.trim_start_matches('[').trim_end_matches(']');
@@ -324,23 +335,24 @@ async fn serve(
 
     // 2. Resolve, then validate the answer. Dialling by name again here would
     //    reopen the rebinding window this ordering exists to close.
-    let resolved = match timeout(
-        CONNECT_TIMEOUT,
-        tokio::net::lookup_host((host, port)),
-    )
-    .await
-    {
+    let resolved = match timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port))).await {
         Ok(Ok(addrs)) => addrs.collect::<Vec<_>>(),
         Ok(Err(err)) => {
-            let _ = guard
-                .recorder
-                .attempt(host, port, false, &format!("DNS lookup failed: {err}"), "connect", None);
+            let _ = guard.recorder.attempt(
+                host,
+                port,
+                false,
+                &format!("DNS lookup failed: {err}"),
+                "connect",
+                None,
+            );
             return respond(&mut client, 502, "Bad Gateway").await;
         }
         Err(_) => {
-            let _ = guard
-                .recorder
-                .attempt(host, port, false, "DNS lookup timed out", "connect", None);
+            let _ =
+                guard
+                    .recorder
+                    .attempt(host, port, false, "DNS lookup timed out", "connect", None);
             return respond(&mut client, 504, "Gateway Timeout").await;
         }
     };
@@ -366,9 +378,16 @@ async fn serve(
 
     let Some(addr) = target_addr else {
         let reason = refusal
-            .map(|r| format!("allowlisted host resolved to a refused address: {}", r.reason()))
+            .map(|r| {
+                format!(
+                    "allowlisted host resolved to a refused address: {}",
+                    r.reason()
+                )
+            })
             .unwrap_or_else(|| "host did not resolve".to_string());
-        let _ = guard.recorder.attempt(host, port, false, &reason, "connect", refused_ip);
+        let _ = guard
+            .recorder
+            .attempt(host, port, false, &reason, "connect", refused_ip);
         return respond(&mut client, 403, "Forbidden").await;
     };
 
@@ -376,15 +395,25 @@ async fn serve(
     let upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
         Ok(Ok(s)) => s,
         Ok(Err(err)) => {
-            let _ = guard
-                .recorder
-                .attempt(host, port, false, &format!("upstream unreachable: {err}"), "connect", Some(addr.ip()));
+            let _ = guard.recorder.attempt(
+                host,
+                port,
+                false,
+                &format!("upstream unreachable: {err}"),
+                "connect",
+                Some(addr.ip()),
+            );
             return respond(&mut client, 502, "Bad Gateway").await;
         }
         Err(_) => {
-            let _ = guard
-                .recorder
-                .attempt(host, port, false, "upstream connect timed out", "connect", Some(addr.ip()));
+            let _ = guard.recorder.attempt(
+                host,
+                port,
+                false,
+                "upstream connect timed out",
+                "connect",
+                Some(addr.ip()),
+            );
             return respond(&mut client, 504, "Gateway Timeout").await;
         }
     };
@@ -394,10 +423,14 @@ async fn serve(
     // channel — a flood of destination-less refusals could exhaust the file,
     // after which a real tunnel to an allowlisted host left no trace while the
     // bundle still read "attested, no attempts".
-    if !guard
-        .recorder
-        .attempt(host, port, true, &verdict.reason, "connect", Some(addr.ip()))
-    {
+    if !guard.recorder.attempt(
+        host,
+        port,
+        true,
+        &verdict.reason,
+        "connect",
+        Some(addr.ip()),
+    ) {
         return respond(&mut client, 503, "Service Unavailable").await;
     }
     tunnel(guard, client, upstream, host, port).await
@@ -498,11 +531,7 @@ async fn tunnel(
 /// The counter is updated before the write, so a byte that was read from the
 /// sandbox is counted even if delivering it upstream then fails. For evidence,
 /// what the agent managed to send is the interesting quantity.
-async fn pump<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-    counter: Arc<AtomicU64>,
-) -> std::io::Result<()>
+async fn pump<R, W>(reader: &mut R, writer: &mut W, counter: Arc<AtomicU64>) -> std::io::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,

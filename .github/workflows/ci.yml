@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  rust:
+    name: rust
+    # Linux on purpose: one recorder test is #[cfg(target_os = "linux")]
+    # because it writes to /dev/full to prove the guard refuses to forward
+    # traffic it could not record. On macOS that test silently does not exist.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to a commit, not a tag: a tag can be moved, and this action
+      # installs the toolchain that compiles the guard.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2
+        with:
+          workspaces: crates/wl-enclave-egress
+      - name: fmt
+        run: cargo fmt --manifest-path crates/wl-enclave-egress/Cargo.toml --check
+      - name: clippy
+        run: >-
+          cargo clippy --manifest-path crates/wl-enclave-egress/Cargo.toml
+          --locked --all-targets -- -D warnings
+      - name: test
+        run: cargo test --manifest-path crates/wl-enclave-egress/Cargo.toml --locked
+      - name: the fail-closed test must actually have run
+        # A #[cfg]-gated test that stops being compiled passes by vanishing.
+        # Naming it here means the platform regression fails the build instead.
+        run: >-
+          cargo test --manifest-path crates/wl-enclave-egress/Cargo.toml --locked
+          a_record_that_does_not_reach_the_file_reports_failure
+          -- --exact --nocapture
+
+  e2e:
+    name: end to end
+    # The one job that tests the product rather than its parts: a real
+    # sandbox, a real guard, real egress, and an evidence bundle verified
+    # offline. Needs Docker, so Linux only — macOS runners have no nested
+    # virtualisation.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+
+      - name: run the example agent under enclave
+        run: wl-enclave -C examples/coder run --purpose "ci"
+
+      - name: the bundle must verify, and the exit code is the gate contract
+        run: |
+          bundle="$(ls -dt examples/coder/runs/*/bundle | head -1)"
+          wl-enclave verify "$bundle"
+
+      - name: the bundle must say what it is supposed to say
+        # Exit 0 alone would pass for a bundle that recorded nothing. These
+        # are the claims the quickstart makes, asserted against a real run.
+        run: |
+          python - <<'PY'
+          import glob, json, os, sys
+
+          bundle = max(glob.glob("examples/coder/runs/*/bundle"), key=os.path.getmtime)
+          records = [json.loads(l) for l in open(f"{bundle}/chain.jsonl")]
+          by_type = {}
+          for r in records:
+              by_type.setdefault(r["type"], []).append(r)
+
+          problems = []
+
+          # the guard saw the allowed fetch and the refused one
+          attempts = {
+              (a["data"]["host"], a["data"]["verdict"])
+              for a in by_type.get("egress.attempt", [])
+          }
+          for expected in [("example.com", "allow"), ("pastebin.com", "deny")]:
+              if expected not in attempts:
+                  problems.append(f"missing egress attempt {expected}; saw {sorted(attempts)}")
+
+          # every control established, and none resting on a request we never checked
+          attested = by_type.get("sandbox.attested", [])
+          if not attested:
+              problems.append("no sandbox.attested record")
+          else:
+              controls = attested[0]["data"]["controls"]
+              for name, entry in controls.items():
+                  if entry.get("in_force") is not True:
+                      problems.append(f"control {name} is {entry.get('in_force')!r}")
+                  if entry.get("verified_by") == "requested_not_readback":
+                      problems.append(f"control {name} rests on an unverified request")
+              for required in ("evidence_masked_from_sandbox", "runs_as_non_root"):
+                  if required not in controls:
+                      problems.append(f"control {required} absent from the attestation")
+
+          # the agent did not run as root
+          uid = controls.get("runs_as_non_root", {}).get("detail", "") if attested else ""
+          if "uid 0" in uid:
+              problems.append(f"the sandbox ran as root: {uid}")
+
+          # which guard build wrote the egress records
+          started = by_type.get("egress.guard_started", [])
+          if not started:
+              problems.append("no egress.guard_started record")
+          elif not started[0]["data"].get("image"):
+              problems.append("the bundle does not identify the guard image")
+
+          # exactly one ending
+          endings = sum(len(by_type.get(t, [])) for t in ("run.close", "run.contained", "run.error"))
+          if endings != 1:
+              problems.append(f"expected exactly one terminal record, found {endings}")
+
+          if problems:
+              print("\n".join(f"FAIL: {p}" for p in problems))
+              sys.exit(1)
+          print(f"OK: {len(records)} records, {len(controls)} controls, all in force")
+          PY
+
+      - name: a tampered bundle must not verify
+        # The product claim is that editing is detectable. If this step ever
+        # succeeds, every green run above meant nothing.
+        run: |
+          bundle="$(ls -dt examples/coder/runs/*/bundle | head -1)"
+          cp -r "$bundle" /tmp/tampered
+          python - <<'PY'
+          import json
+          path = "/tmp/tampered/chain.jsonl"
+          records = [json.loads(l) for l in open(path)]
+          for r in records:
+              if r["type"] == "egress.attempt" and r["data"].get("verdict") == "deny":
+                  r["data"]["verdict"] = "allow"   # launder a refusal
+                  break
+          else:
+              raise SystemExit("no denied attempt to tamper with")
+          with open(path, "w") as fh:
+              for r in records:
+                  fh.write(json.dumps(r, sort_keys=True) + "\n")
+          PY
+          if wl-enclave verify /tmp/tampered; then
+            echo "FAIL: a tampered chain verified"
+            exit 1
+          fi
+          echo "OK: tampering was detected"
+
+      - name: keep the bundle for inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-bundle
+          path: examples/coder/runs/*/bundle/
+          if-no-files-found: warn
