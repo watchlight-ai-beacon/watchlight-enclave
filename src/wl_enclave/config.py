@@ -9,6 +9,7 @@ collapsing them would mean one could not be tightened without the other.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -114,6 +115,52 @@ class Config:
         """The directory ``enclave.yaml`` sits in. Relative paths resolve here."""
         return self.path.parent
 
+    def governing_digests(self) -> dict:
+        """Hashes of the files that decided what this run was allowed to do.
+
+        The workspace is mounted writable, because an agent that cannot write
+        code cannot do the job. That means ``enclave.yaml`` and the policy
+        bundle are both reachable from inside the sandbox, so a run can change
+        what the *next* run is permitted to do. Making them read-only is not
+        available without taking away the workspace.
+
+        What is available is making the change visible. Each bundle states the
+        exact bytes that governed it, so two runs under silently different
+        rules cannot read as two runs under the same rules — which is the part
+        that would actually mislead a reviewer. A run that widened its
+        successor's allowlist leaves the widening in its own evidence.
+
+        This is not a signature and does not try to be. It proves two bundles
+        were governed by different files; it proves nothing about which was
+        the intended one.
+        """
+        files: dict[str, str] = {}
+        for label, target in self._governing_files():
+            try:
+                files[label] = (
+                    "sha256:"
+                    + hashlib.sha256(target.read_bytes()).hexdigest()
+                )
+            except OSError as exc:
+                files[label] = f"unreadable: {exc.strerror or exc}"
+        # A digest over the per-file digests, so a reviewer comparing two runs
+        # has one value to compare rather than a set. Keyed by label and
+        # sorted, so it does not change when the filesystem's ordering does.
+        combined = hashlib.sha256(
+            "\n".join(f"{k}={v}" for k, v in sorted(files.items())).encode()
+        ).hexdigest()
+        return {"files": files, "combined": f"sha256:{combined}"}
+
+    def _governing_files(self) -> list[tuple[str, Path]]:
+        """``(label, path)`` for every file whose contents decide the rules."""
+        out = [("enclave.yaml", self.path)]
+        if self.policy.is_dir():
+            for policy_file in sorted(self.policy.glob("*.policy.json")):
+                out.append((f"policy/{policy_file.name}", policy_file))
+        elif self.policy.is_file():
+            out.append((f"policy/{self.policy.name}", self.policy))
+        return out
+
 
 def _require_str_list(raw: Any, where: str, problems: list[str]) -> list[str]:
     if raw is None:
@@ -197,7 +244,26 @@ def load(path: Path) -> Config:
     # --- policy ------------------------------------------------------------
     policy = Path(raw.get("policy", "./policies"))
     resolved_policy = policy if policy.is_absolute() else path.parent / policy
-    if not resolved_policy.exists():
+    # Required to sit inside the project. The policy bundle is mounted into the
+    # sandbox, so an unconstrained path here is a way to mount an arbitrary
+    # host directory into a sandbox from a config file — and enclave.yaml is
+    # itself inside the workspace a run can write to, which means a run could
+    # choose what the next run mounts. Containment is checked after resolving
+    # symlinks, because a symlink inside the project pointing out of it passes
+    # a check made on the path as written.
+    try:
+        real_policy = resolved_policy.resolve()
+        real_root = path.parent.resolve()
+        contained = real_policy == real_root or real_root in real_policy.parents
+    except OSError:
+        contained = False
+    if not contained:
+        problems.append(
+            f"policy: {policy} resolves outside the project directory; the "
+            f"bundle is mounted into the sandbox, so it must be a path this "
+            f"project owns"
+        )
+    elif not resolved_policy.exists():
         problems.append(f"policy: {policy} does not exist")
     elif resolved_policy.is_dir() and not any(resolved_policy.glob("*.policy.json")):
         problems.append(

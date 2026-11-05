@@ -228,6 +228,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "wl_enclave_version": __version__,
         },
     )
+    # What governed this run, by content rather than by path. The workspace is
+    # writable, so a run can edit the rules its successor will be held to;
+    # recording the bytes means the next bundle cannot silently claim the same
+    # rules as this one.
+    chain.append(
+        "config.attested",
+        {
+            "policy_path": str(cfg.policy.relative_to(cfg.root))
+            if cfg.policy.is_relative_to(cfg.root)
+            else str(cfg.policy),
+            "egress_allow": sorted(cfg.egress_allow),
+            "digests": cfg.governing_digests(),
+        },
+    )
 
     # Bring the egress guard up before the sandbox, so the sandbox has
     # somewhere to send traffic the moment it starts.
@@ -606,6 +620,11 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             1 for c in result.controls.values() if c.get("in_force") is True
         )
         _say(f"controls {in_force}/{len(result.controls)} in force")
+    if result.governed_by:
+        # Printed so two bundles can be compared by eye. A reviewer who sees
+        # two runs claim the same policy is entitled to check that claim, and
+        # this is the value that settles it.
+        _say(f"governed by {result.governed_by}")
         for name, entry in sorted(result.controls.items()):
             if entry.get("in_force") is True:
                 continue

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from wl_enclave import config
+from wl_enclave import config, evidence
 
 
 def write(tmp_path, body: str, policies: bool = True):
@@ -244,3 +244,93 @@ def test_the_allowlist_type_has_no_second_matcher():
     from wl_enclave.egress import Allowlist
 
     assert not hasattr(Allowlist, "permits")
+
+
+# -- the rules that governed a run are recorded by content ----------------
+
+#: A complete, valid config. Written out in each test rather than shared by
+#: reference so a test that needs to change one field cannot change another
+#: test's expectations.
+_VALID = """version: 1
+
+agent:
+  name: a
+  command: ["true"]
+  image: python:3.12-slim
+
+policy: {policy}
+"""
+
+
+def _project(tmp_path, policy="./policies"):
+    project = tmp_path / "proj"
+    project.mkdir(exist_ok=True)
+    (project / "enclave.yaml").write_text(_VALID.format(policy=policy))
+    return project
+
+
+def test_a_policy_path_outside_the_project_is_refused(tmp_path):
+    """The bundle is mounted into the sandbox, so the path cannot be arbitrary.
+
+    enclave.yaml lives in the workspace a run can write to, so without this an
+    agent could point its successor's policy mount at any host directory.
+    """
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "x.policy.json").write_text("{}")
+    project = _project(tmp_path, policy=str(outside))
+    with pytest.raises(config.ConfigError, match="outside the project directory"):
+        config.load(project / "enclave.yaml")
+
+
+def test_a_symlink_out_of_the_project_is_refused(tmp_path):
+    """Checked after resolving, because a symlink defeats a textual check."""
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "x.policy.json").write_text("{}")
+    project = _project(tmp_path)
+    (project / "policies").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(config.ConfigError, match="outside the project directory"):
+        config.load(project / "enclave.yaml")
+
+
+def test_changing_a_policy_changes_the_governing_digest(tmp_path):
+    """What makes a rewritten policy visible instead of silent.
+
+    The workspace is writable by design, so a run can edit the rules its
+    successor is held to. This cannot prevent that; it makes two runs under
+    different rules impossible to mistake for two runs under the same rules.
+    """
+    project = _project(tmp_path)
+    (project / "policies").mkdir(parents=True, exist_ok=True)
+    (project / "policies" / "a.policy.json").write_text('{"allow": []}')
+
+    before = config.load(project / "enclave.yaml").governing_digests()
+    (project / "policies" / "a.policy.json").write_text('{"allow": ["*"]}')
+    after = config.load(project / "enclave.yaml").governing_digests()
+
+    assert before["combined"] != after["combined"]
+    assert before["files"]["enclave.yaml"] == after["files"]["enclave.yaml"]
+    assert before["files"]["policy/a.policy.json"] != after["files"]["policy/a.policy.json"]
+    # Adding a rule file counts too: a permission can be granted in a new file.
+    (project / "policies" / "b.policy.json").write_text("{}")
+    assert config.load(project / "enclave.yaml").governing_digests()["combined"] != after["combined"]
+
+
+def test_an_unreadable_rule_file_makes_the_bundle_incomplete(tmp_path):
+    """A rule we cannot read is a rule the bundle cannot state."""
+    bundle = tmp_path / "bundle"
+    chain = evidence.ChainWriter(bundle)
+    chain.append("run.open", {"purpose": "t"})
+    chain.append("config.attested", {"digests": {
+        "combined": "sha256:abc",
+        "files": {"enclave.yaml": "sha256:def",
+                  "policy/x.policy.json": "unreadable: Permission denied"},
+    }})
+    chain.append("run.close", {"exit_code": 0})
+    chain.seal({"agent": "t"})
+
+    result = evidence.verify(bundle)
+    assert result.ok is True, "the chain is intact"
+    assert result.verdict == "incomplete"
+    assert any("cannot state what governed" in r for r in result.incomplete_reasons)

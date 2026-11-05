@@ -291,6 +291,11 @@ class VerifyResult:
     #: asking why a bundle is weaker than expected is always asking about one
     #: of these, which is why they are not collapsed into a boolean.
     controls: dict = field(default_factory=dict)
+    #: Digest of the files that decided what this run was allowed to do. Two
+    #: bundles with different values here were governed by different rules,
+    #: whatever their summaries say — which matters because the workspace is
+    #: writable and a run can edit its successor's rules.
+    governed_by: str = ""
     #: ``False`` when some control was established as not in force. A third
     #: claim, independent of the two above, because it fails differently: the
     #: chain can be intact and complete and still faithfully describe a run
@@ -457,6 +462,8 @@ def verify(bundle_dir: Path) -> VerifyResult:
     # fact as a dropped record: everything stated is true and something is
     # unknown. The two therefore land on different halves of the verdict.
     controls: dict[str, dict] = {}
+    incomplete_reasons: list[str] = []
+    governed_by = ""
     for record in records:
         if record.type in {"sandbox.attested", "egress.attested"}:
             found = record.data.get("controls")
@@ -464,6 +471,23 @@ def verify(bundle_dir: Path) -> VerifyResult:
                 found = (record.data.get("constraints") or {}).get("controls")
             if isinstance(found, dict):
                 controls = attestation.merge(controls, found)
+        elif record.type == "config.attested":
+            digests = record.data.get("digests")
+            if isinstance(digests, dict):
+                governed_by = digests.get("combined") or ""
+                unreadable = sorted(
+                    name
+                    for name, value in (digests.get("files") or {}).items()
+                    if isinstance(value, str) and not value.startswith("sha256:")
+                )
+                if unreadable:
+                    # A rule file that could not be read is a rule we cannot
+                    # state. Incomplete rather than failed: the chain is sound
+                    # and one of its claims is missing.
+                    incomplete_reasons.append(
+                        "the bundle cannot state what governed the run; "
+                        "unreadable: " + ", ".join(unreadable)
+                    )
         elif record.type == "egress.guard_stopped":
             # The guard's fate is known only at the end, after the topology
             # was attested. Folded in as a control so it reaches the same
@@ -480,7 +504,7 @@ def verify(bundle_dir: Path) -> VerifyResult:
                 },
             )
 
-    incomplete_reasons: list[str] = []
+
     if suppressions:
         dropped = f"{records_dropped} " if records_dropped else ""
         incomplete_reasons.append(
@@ -513,4 +537,5 @@ def verify(bundle_dir: Path) -> VerifyResult:
         incomplete_reasons=incomplete_reasons,
         controls=controls,
         contained=not attestation.failed_controls(controls),
+        governed_by=governed_by,
     )
