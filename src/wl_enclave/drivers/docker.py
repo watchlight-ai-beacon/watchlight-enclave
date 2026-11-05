@@ -151,49 +151,27 @@ class DockerDriver:
             "--cpus", str(spec.cpus),
             "--workdir", spec.workdir,
         ]
-        # Argv order is NOT what makes this work, and believing it does will
-        # cost someone the fix later: the daemon sorts mount points by
-        # destination path length before mounting, so a shorter bind target is
-        # always mounted before a longer path nested inside it, whatever order
-        # they were given in. The real invariant is nesting — a mask must be
-        # strictly below a mount target, or it collides with it instead of
-        # covering it — so that is checked rather than assumed.
+        # One list, one pass. Argv order is not what decides which entry wins
+        # — the daemon sorts mount points by destination path length, so a
+        # shorter bind target is mounted before a path nested inside it
+        # whatever order they arrive in. The invariant that does matter is
+        # nesting, and SandboxSpec has already enforced it: a mask that is not
+        # strictly below a bind target cannot be constructed.
         declared_masks: list[str] = []
-        mount_targets = [posixpath.normpath(m.target) for m in spec.mounts]
-        for path in spec.shadow:
-            self._reject_flaglike("shadow path", path)
-            # Normalised before the check AND before the argv, because the
-            # daemon normalises the destination itself. A prefix test on the
-            # raw string is not the same question: "/work/runs/../../etc"
-            # starts with "/work/" and passes, and the daemon then mounts the
-            # tmpfs on /etc while the run directory stays readable. The
-            # attestation would report the path as given, so the bundle would
-            # claim a mask that covered something else entirely.
-            normalised = posixpath.normpath(path)
-            if not posixpath.isabs(normalised) or normalised != path.rstrip("/"):
-                raise DriverError(
-                    f"masked path {path!r} is not a normalised absolute path "
-                    f"(it resolves to {normalised!r}); a path that changes "
-                    f"under normalisation would be checked and mounted as two "
-                    f"different locations"
-                )
-            if not any(
-                normalised.startswith(target + "/") for target in mount_targets
-            ):
-                raise DriverError(
-                    f"masked path {path!r} is not strictly below a mount target "
-                    f"({', '.join(mount_targets) or 'none'}); it would collide "
-                    f"with a mount instead of covering it"
-                )
-            args += ["--tmpfs", f"{normalised}:rw,noexec,nosuid,size=1m"]
-            declared_masks.append(normalised)
-
         for mount in spec.mounts:
-            ro = ",readonly" if mount.read_only else ""
-            args += [
-                "--mount",
-                f"type=bind,src={mount.source.resolve()},dst={mount.target}{ro}",
-            ]
+            self._reject_flaglike("mount target", mount.target)
+            target = posixpath.normpath(mount.target)
+            if mount.masked:
+                args += ["--tmpfs", f"{target}:rw,noexec,nosuid,size=1m"]
+                declared_masks.append(target)
+            else:
+                assert mount.source is not None  # guaranteed by Mount.bind
+                ro = ",readonly" if mount.read_only else ""
+                args += [
+                    "--mount",
+                    f"type=bind,src={mount.source.resolve()},dst={target}{ro}",
+                ]
+
         for key, value in sorted(spec.env.items()):
             args += ["--env", f"{key}={value}"]
         args += [spec.image, *spec.command]
@@ -226,8 +204,10 @@ class DockerDriver:
         the path whenever the file underneath it appears.
         """
         planted: dict[str, Path] = {}
+        by_target = {posixpath.normpath(m.target): m for m in spec.mounts}
         for mask in masks:
-            host_path = self._host_path_behind(spec, mask)
+            mount = by_target.get(mask)
+            host_path = spec.host_path_behind(mount) if mount else None
             if host_path is None:
                 continue
             canary = host_path / f".wl-mask-canary-{secrets.token_hex(8)}"
@@ -243,24 +223,6 @@ class DockerDriver:
                 continue
             planted[posixpath.join(mask, canary.name)] = canary
         return planted
-
-    @staticmethod
-    def _host_path_behind(spec: SandboxSpec, mask: str) -> Optional[Path]:
-        """The host directory a masked in-container path resolves to.
-
-        provision() has already established that every mask sits strictly
-        below a mount target, so the longest matching target is the one the
-        mask is nested in.
-        """
-        best: Optional[tuple[int, Path, str]] = None
-        for mount in spec.mounts:
-            target = posixpath.normpath(mount.target)
-            if mask.startswith(target + "/") and (best is None or len(target) > best[0]):
-                best = (len(target), mount.source, target)
-        if best is None:
-            return None
-        _, source, target = best
-        return Path(source).resolve() / posixpath.relpath(mask, target)
 
     def attest(self, sandbox: Sandbox) -> dict:
         """Read the sandbox's actual constraints back out of the runtime.

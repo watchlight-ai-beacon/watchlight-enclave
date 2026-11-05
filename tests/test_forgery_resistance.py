@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from wl_enclave import evidence, runs
-from wl_enclave.cli import _shadow_for_runs
+from wl_enclave.cli import _mask_for_runs
 from wl_enclave.egress import EGRESS_UNRECOGNISED, GUARD_RECORD_TYPES
 
 REPO = Path(__file__).resolve().parents[1]
@@ -38,16 +38,20 @@ def test_the_guard_file_is_not_under_the_sandbox_writable_directory():
     assert run.guard_dir != run.evidence_dir
 
 
-def test_runs_inside_the_workspace_are_shadowed():
-    assert _shadow_for_runs(Path("/proj"), Path("/proj/runs")) == ["/work/runs"]
+def test_runs_inside_the_workspace_are_masked():
+    masks = _mask_for_runs(Path("/proj"), Path("/proj/runs"))
+    assert [m.target for m in masks] == ["/work/runs"]
+    assert masks[0].masked is True
+    assert masks[0].source is None
 
 
-def test_a_runs_directory_outside_the_workspace_needs_no_shadow():
-    assert _shadow_for_runs(Path("/proj"), Path("/elsewhere/runs")) == []
+def test_a_runs_directory_outside_the_workspace_needs_no_mask():
+    assert _mask_for_runs(Path("/proj"), Path("/elsewhere/runs")) == []
 
 
-def test_a_nested_runs_directory_is_shadowed_at_its_real_depth():
-    assert _shadow_for_runs(Path("/proj"), Path("/proj/var/runs")) == ["/work/var/runs"]
+def test_a_nested_runs_directory_is_masked_at_its_real_depth():
+    masks = _mask_for_runs(Path("/proj"), Path("/proj/var/runs"))
+    assert [m.target for m in masks] == ["/work/var/runs"]
 
 
 # -- the orchestrator owns the record type namespace ------------------------
@@ -134,8 +138,13 @@ def test_the_spec_declares_the_mask_so_a_driver_can_attest_it():
     """
     from wl_enclave.drivers import SandboxSpec
 
-    spec = SandboxSpec(name="n", image="i", command=["c"], shadow=["/work/runs"])
-    assert spec.shadow == ["/work/runs"]
+    from wl_enclave.drivers import Mount, SandboxSpec
+
+    spec = SandboxSpec(
+        name="n", image="i", command=["c"],
+        mounts=[Mount.bind(Path("/proj"), "/work"), Mount.mask("/work/runs")],
+    )
+    assert [m.target for m in spec.mounts if m.masked] == ["/work/runs"]
 
 
 def test_a_mask_must_be_strictly_below_a_mount_target():
@@ -149,13 +158,14 @@ def test_a_mask_must_be_strictly_below_a_mount_target():
     from wl_enclave.drivers import DriverError, Mount, SandboxSpec
     from wl_enclave.drivers.docker import DockerDriver
 
-    spec = SandboxSpec(
-        name="n", image="python:3.12-slim", command=["true"],
-        mounts=[Mount(source=Path("/tmp"), target="/work")],
-        shadow=["/work"],  # equal to the mount target, not below it
-    )
     with pytest.raises(DriverError, match="not strictly below"):
-        DockerDriver().provision(spec)
+        SandboxSpec(
+            name="n", image="python:3.12-slim", command=["true"],
+            mounts=[
+                Mount.bind(Path("/tmp"), "/work"),
+                Mount.mask("/work"),  # equal to the bind target, not below it
+            ],
+        )
 
 
 def test_the_guard_writes_outside_the_shared_evidence_path():
@@ -284,13 +294,11 @@ def test_a_mask_that_changes_under_normalisation_is_refused(shadow, why):
     from wl_enclave.drivers import DriverError, Mount, SandboxSpec
     from wl_enclave.drivers.docker import DockerDriver
 
-    spec = SandboxSpec(
-        name="n", image="python:3.12-slim", command=["true"],
-        mounts=[Mount(source=Path("/tmp"), target="/work")],
-        shadow=[shadow],
-    )
     with pytest.raises(DriverError):
-        DockerDriver().provision(spec)
+        SandboxSpec(
+            name="n", image="python:3.12-slim", command=["true"],
+            mounts=[Mount.bind(Path("/tmp"), "/work"), Mount.mask(shadow)],
+        )
 
 
 # -- decision records are the agent's own account, and are treated as such --
@@ -444,3 +452,64 @@ def test_a_mask_the_daemon_records_but_does_not_apply_is_caught():
                 ["docker", "kill", container], capture_output=True, timeout=60
             )
         shutil.rmtree(project, ignore_errors=True)
+
+
+# -- mount coherence is a fact about the spec, not about one driver --------
+
+def test_the_spec_derives_the_host_path_a_mask_hides():
+    """The derivation moved onto the spec because the spec holds both halves.
+
+    It used to live in the Docker driver, which meant a second driver either
+    reimplemented it or quietly had no canary to plant — and a mask nobody can
+    test is a mask nobody should claim.
+    """
+    from wl_enclave.drivers import Mount, SandboxSpec
+
+    spec = SandboxSpec(
+        name="n", image="i", command=["c"],
+        mounts=[
+            Mount.bind(Path("/proj"), "/work"),
+            Mount.bind(Path("/other"), "/work/nested"),
+            Mount.mask("/work/runs"),
+            Mount.mask("/work/nested/deep"),
+        ],
+    )
+    masks = {m.target: spec.host_path_behind(m) for m in spec.mounts if m.masked}
+    assert masks["/work/runs"] == Path("/proj/runs")
+    # The longest matching bind wins, not the first.
+    assert masks["/work/nested/deep"] == Path("/other/deep")
+    # A bind has nothing behind it.
+    binds = [m for m in spec.mounts if not m.masked]
+    assert spec.host_path_behind(binds[0]) is None
+
+
+def test_incoherent_mounts_reports_every_problem_without_raising():
+    """So a caller can report them all at once, the way config.load does."""
+    from wl_enclave.drivers import Mount, SandboxSpec
+
+    # Built field-by-field to bypass __post_init__, which is what a caller
+    # wanting to report rather than raise would do.
+    spec = SandboxSpec.__new__(SandboxSpec)
+    object.__setattr__(spec, "mounts", [
+        Mount.bind(Path("/proj"), "/work"),
+        Mount.mask("/work"),
+        Mount.mask("relative/path"),
+        Mount.mask("/work/runs/../../etc"),
+    ])
+    problems = spec.incoherent_mounts()
+    assert len(problems) == 3
+    assert any("not strictly below" in p for p in problems)
+    assert any("not absolute" in p for p in problems)
+    assert any("not normalised" in p for p in problems)
+
+
+def test_a_mask_cannot_be_built_with_a_source():
+    """`source is None` is the discriminant, so the constructors enforce it."""
+    from wl_enclave.drivers import Mount
+
+    assert Mount.mask("/work/runs").source is None
+    assert Mount.mask("/work/runs").masked is True
+    assert Mount.bind(Path("/proj"), "/work").masked is False
+    # A mask is writable on purpose: the sandbox should see an empty directory
+    # rather than a permission error it could mistake for its own bug.
+    assert Mount.mask("/work/runs").read_only is False

@@ -271,14 +271,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "WL_ENCLAVE_AGENT": cfg.agent.name,
             "WL_ENCLAVE_POLICY": "/policy",
         },
-        # The workspace is the project root, and the run directory lives inside
-        # it. Without a shadow the agent could reach /work/runs/<id>/bundle and
-        # rewrite the chain describing itself while the run was still going.
-        shadow=_shadow_for_runs(cfg.root, cfg.root / runs.RUNS_DIR),
+        # Binds and masks in one list, ordered so it reads as what the sandbox
+        # sees: the workspace, then the hole punched in it. The workspace is
+        # the project root and the run directory lives inside it, so without
+        # the mask the agent could reach /work/runs/<id>/bundle and rewrite the
+        # chain describing itself while the run was still going.
         mounts=[
-            Mount(source=cfg.root, target="/work", read_only=False),
-            Mount(source=cfg.policy, target="/policy", read_only=True),
-            Mount(source=run.evidence_dir, target=AUDIT_DIR_IN_SANDBOX, read_only=False),
+            Mount.bind(cfg.root, "/work", read_only=False),
+            *_mask_for_runs(cfg.root, cfg.root / runs.RUNS_DIR),
+            Mount.bind(cfg.policy, "/policy", read_only=True),
+            Mount.bind(run.evidence_dir, AUDIT_DIR_IN_SANDBOX, read_only=False),
         ],
         # Either an internal network whose only way out is the guard, or no
         # network at all. Never a default bridge.
@@ -541,18 +543,20 @@ def _cmd_kill(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------- verify ---
-def _shadow_for_runs(root: Path, runs_root: Path) -> list[str]:
-    """In-sandbox paths to cover so the run cannot see its own evidence.
+def _mask_for_runs(root: Path, runs_root: Path) -> list[Mount]:
+    """The mask that keeps a run from seeing its own evidence, if one is needed.
 
-    Returns the workspace-relative location of ``runs/`` when it sits inside
-    the directory mounted at ``/work``. When it does not, there is nothing to
-    hide and the list is empty.
+    Returns a single masked mount at the workspace-relative location of
+    ``runs/`` when it sits inside the directory mounted at ``/work``. When it
+    does not, there is nothing to hide and the list is empty — which is why
+    this returns a list rather than an optional: it splices into the mount
+    list either way, and the caller does not have to care.
     """
     try:
         relative = runs_root.resolve().relative_to(root.resolve())
     except ValueError:
         return []
-    return [f"/work/{relative.as_posix()}"]
+    return [Mount.mask(f"/work/{relative.as_posix()}")]
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:

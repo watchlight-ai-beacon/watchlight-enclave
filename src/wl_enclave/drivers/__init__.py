@@ -13,6 +13,7 @@ makes the isolation half of an evidence bundle worth anything.
 
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
@@ -33,11 +34,45 @@ class DriverError(Exception):
 
 @dataclass(frozen=True)
 class Mount:
-    """A host path exposed inside the sandbox."""
+    """One entry in a sandbox's filesystem, exposed or hidden.
 
-    source: Path
+    Both kinds live in the same ordered list because they are the same
+    decision: what the sandbox can see at a path. They were two lists, and the
+    cost of that showed up twice. The driver validated the relationship between
+    them, so every other driver would have had to reimplement that check or
+    silently omit it; and the caller had to derive a masked path from a mount
+    target it held separately, which is how a mask could name somewhere no
+    mount reached.
+
+    ``source is None`` is the discriminant: a mask has nothing behind it to
+    name. Use :meth:`bind` and :meth:`mask` rather than the constructor, so a
+    mask with a source is not a thing that can be written.
+    """
+
     target: str
+    source: Optional[Path] = None
     read_only: bool = True
+
+    @property
+    def masked(self) -> bool:
+        """True when this entry hides a path rather than exposing one."""
+        return self.source is None
+
+    @classmethod
+    def bind(cls, source: Path, target: str, read_only: bool = True) -> "Mount":
+        """Expose a host path inside the sandbox."""
+        return cls(target=target, source=Path(source), read_only=read_only)
+
+    @classmethod
+    def mask(cls, target: str) -> "Mount":
+        """Cover a path with an empty writable filesystem.
+
+        Used to keep a run's own evidence out of reach of a workspace mount
+        that would otherwise contain it. A mask is always writable: the point
+        is that the sandbox sees an ordinary empty directory rather than a
+        permission error it could mistake for a bug in its own code.
+        """
+        return cls(target=target, source=None, read_only=False)
 
 
 @dataclass(frozen=True)
@@ -53,16 +88,83 @@ class SandboxSpec:
     command: list[str]
     workdir: str = "/work"
     env: dict[str, str] = field(default_factory=dict)
+    #: Binds and masks together, in the order a reader should understand them.
+    #: Argv order does not decide which wins — the daemon sorts mount points by
+    #: destination path length — so this list is for the reader and for the
+    #: coherence check below, not for the runtime.
     mounts: list[Mount] = field(default_factory=list)
-    #: Paths inside the sandbox to cover with an empty writable filesystem,
-    #: hiding whatever a mount would otherwise expose there. Used to keep the
-    #: run's own evidence out of reach of a workspace mount that would
-    #: otherwise contain it.
-    shadow: list[str] = field(default_factory=list)
     network: str = "none"
     memory_bytes: int = 2 * 1024**3
     cpus: float = 2.0
     pids: int = 512
+
+    def __post_init__(self) -> None:
+        for problem in self.incoherent_mounts():
+            raise DriverError(problem)
+
+    def incoherent_mounts(self) -> list[str]:
+        """Ways this spec's mounts contradict each other.
+
+        Checked on the spec rather than in a driver because it is a fact about
+        what was asked for, not about how one runtime implements it: a second
+        driver must not be able to omit the check by forgetting it existed.
+
+        The invariant is nesting. A mask covers a path *inside* a bind, so a
+        mask that is not strictly below some bind target collides with a mount
+        instead of covering it — and the collision is silent, because the
+        runtime reports the mask as requested either way.
+        """
+        problems: list[str] = []
+        binds = [m for m in self.mounts if not m.masked]
+        bind_targets = [posixpath.normpath(m.target) for m in binds]
+
+        for mount in self.mounts:
+            normalised = posixpath.normpath(mount.target)
+            if not posixpath.isabs(normalised):
+                problems.append(
+                    f"mount target {mount.target!r} is not absolute"
+                )
+                continue
+            # A path that changes under normalisation would be checked as one
+            # location and mounted as another, since the runtime normalises
+            # the destination itself.
+            if normalised != mount.target.rstrip("/") or not mount.target:
+                problems.append(
+                    f"mount target {mount.target!r} is not normalised "
+                    f"(it resolves to {normalised!r})"
+                )
+                continue
+            if mount.masked and not any(
+                normalised.startswith(target + "/") for target in bind_targets
+            ):
+                problems.append(
+                    f"masked path {mount.target!r} is not strictly below a "
+                    f"bind target ({', '.join(bind_targets) or 'none'}); it "
+                    f"would collide with a mount instead of covering it"
+                )
+        return problems
+
+    def host_path_behind(self, mask: Mount) -> Optional[Path]:
+        """The host directory a masked path resolves to, or ``None``.
+
+        What a mask hides is a real directory on the host, and testing that the
+        mask holds means reading something planted there. The longest matching
+        bind target is the one the mask is nested in.
+        """
+        if not mask.masked:
+            return None
+        target = posixpath.normpath(mask.target)
+        best: Optional[tuple[int, Path, str]] = None
+        for mount in self.mounts:
+            if mount.masked or mount.source is None:
+                continue
+            bind = posixpath.normpath(mount.target)
+            if target.startswith(bind + "/") and (best is None or len(bind) > best[0]):
+                best = (len(bind), mount.source, bind)
+        if best is None:
+            return None
+        _, source, bind = best
+        return Path(source).resolve() / posixpath.relpath(target, bind)
 
 
 @dataclass
