@@ -513,3 +513,65 @@ def test_a_mask_cannot_be_built_with_a_source():
     # A mask is writable on purpose: the sandbox should see an empty directory
     # rather than a permission error it could mistake for its own bug.
     assert Mount.mask("/work/runs").read_only is False
+
+
+# -- a chain is verified before it is extended -----------------------------
+
+def test_an_edited_chain_cannot_be_extended(tmp_path):
+    """The attack this closes.
+
+    Appending to a chain resumes from its head. If that head is taken on
+    trust, an attacker edits a record, appends anything, and seals — and the
+    seal recomputes every hash from the edit onward so the result verifies
+    cleanly. The one operation that would have caught the edit is the one that
+    overwrites the evidence of it.
+    """
+    bundle = tmp_path / "bundle"
+    chain = evidence.ChainWriter(bundle)
+    chain.append("run.open", {"purpose": "original"})
+    chain.append("decision", {"intent": "read", "resource": "/etc/passwd"})
+
+    lines = (bundle / evidence.CHAIN_FILE).read_text().splitlines()
+    edited = json.loads(lines[1])
+    edited["data"]["resource"] = "/harmless"
+    lines[1] = json.dumps(edited, sort_keys=True, separators=(",", ":"))
+    (bundle / evidence.CHAIN_FILE).write_text("\n".join(lines) + "\n")
+
+    with pytest.raises(evidence.BrokenChain, match="does not match its own content"):
+        evidence.ChainWriter(bundle)
+
+
+def test_a_reordered_chain_cannot_be_extended(tmp_path):
+    bundle = tmp_path / "bundle"
+    chain = evidence.ChainWriter(bundle)
+    chain.append("run.open", {"purpose": "t"})
+    chain.append("decision", {"n": 1})
+    chain.append("decision", {"n": 2})
+
+    path = bundle / evidence.CHAIN_FILE
+    lines = path.read_text().splitlines()
+    lines[1], lines[2] = lines[2], lines[1]
+    path.write_text("\n".join(lines) + "\n")
+
+    with pytest.raises(evidence.BrokenChain):
+        evidence.ChainWriter(bundle)
+
+
+def test_an_intact_chain_still_resumes(tmp_path):
+    """The check must not cost the capability it protects.
+
+    Sealing a partial bundle is how a contained run still produces evidence,
+    so resuming has to keep working for every chain that does verify.
+    """
+    bundle = tmp_path / "bundle"
+    first = evidence.ChainWriter(bundle)
+    first.append("run.open", {"purpose": "t"})
+    first.append("decision", {"n": 1})
+
+    resumed = evidence.ChainWriter(bundle)
+    resumed.append("run.contained", {"reason": "operator"})
+    resumed.seal({"run": "r"})
+
+    result = evidence.verify(bundle)
+    assert result.ok is True
+    assert result.records == 3

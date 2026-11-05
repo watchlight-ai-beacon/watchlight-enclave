@@ -54,6 +54,7 @@ from . import attestation
 
 __all__ = [
     "GENESIS",
+    "BrokenChain",
     "CHAIN_FILE",
     "MANIFEST_FILE",
     "Record",
@@ -120,6 +121,10 @@ class Record:
         )
 
 
+class BrokenChain(Exception):
+    """An existing chain failed verification, so it must not be extended."""
+
+
 class ChainWriter:
     """Appends records to a bundle, maintaining the chain as it goes.
 
@@ -134,9 +139,36 @@ class ChainWriter:
         self._seq = 0
         self._head = GENESIS
         if self.path.exists():
-            for rec in _read_chain(self.path):
-                self._seq = rec.seq + 1
-                self._head = rec.hash
+            # Verified before it is extended, not merely read. Resuming from
+            # the head of a chain nobody checked is how tampering becomes
+            # self-consistent: append onto an edited record and seal a fresh
+            # manifest over the result, and every hash from the edit onward is
+            # recomputed to agree with it. The one operation that would have
+            # caught the edit is the one that overwrites the evidence of it.
+            try:
+                existing = _read_chain(self.path)
+            except ValueError as exc:
+                raise BrokenChain(f"{self.path}: {exc}") from exc
+            prev = GENESIS
+            for i, rec in enumerate(existing):
+                if rec.seq != i or rec.prev != prev:
+                    raise BrokenChain(
+                        f"{self.path}: record {i} does not follow the one "
+                        f"before it; refusing to extend a chain that does not "
+                        f"verify"
+                    )
+                if rec.hash != Record.digest(
+                    rec.seq, rec.ts, rec.type, rec.data, rec.prev
+                ):
+                    raise BrokenChain(
+                        f"{self.path}: record {rec.seq} does not match its own "
+                        f"content; refusing to extend a chain that does not "
+                        f"verify"
+                    )
+                prev = rec.hash
+            if existing:
+                self._seq = existing[-1].seq + 1
+                self._head = existing[-1].hash
 
     @property
     def head(self) -> str:

@@ -24,6 +24,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -142,8 +143,9 @@ impl Recorder {
         allowed: bool,
         reason: &str,
         protocol: &str,
+        resolved: Option<IpAddr>,
     ) -> bool {
-        let record = serde_json::json!({
+        let mut record = serde_json::json!({
             "ts": iso8601_now(),
             "event": "egress.attempt",
             "host": sanitize(host),
@@ -152,7 +154,67 @@ impl Recorder {
             "reason": sanitize(reason),
             "protocol": protocol,
         });
+        // The address actually dialled, when one was. A hostname is what the
+        // allowlist decides on, and it is not what the traffic went to: a name
+        // can resolve differently between the decision and the next lookup, and
+        // an investigator correlating this bundle against a netflow log or a
+        // firewall record has only the address to join on. Omitted rather than
+        // null when no address was chosen, so its presence means something.
+        if let Some(ip) = resolved {
+            record["resolved_ip"] = serde_json::json!(ip.to_string());
+        }
         self.write(record)
+    }
+
+    /// A request that never became an attempt, because it could not be parsed.
+    ///
+    /// Previously these returned a status code and left no trace: a head that
+    /// timed out, exceeded its size bound, or carried no request line. That is
+    /// a hole of exactly the shape this guard exists to close — traffic the
+    /// sandbox initiated, refused by the guard, absent from the evidence. The
+    /// bundle could not distinguish "the agent made no malformed requests"
+    /// from "the agent made ten thousand of them".
+    ///
+    /// No host is claimed, because none was parsed. Guessing one from a
+    /// malformed head would put an attacker-chosen string in the field a
+    /// reviewer reads as a destination.
+    pub fn malformed(&self, reason: &str, bytes_read: usize) -> bool {
+        self.write(serde_json::json!({
+            "ts": iso8601_now(),
+            "event": "egress.malformed",
+            "verdict": "deny",
+            "reason": sanitize(reason),
+            "bytes_read": bytes_read,
+            "protocol": "http",
+        }))
+    }
+
+    /// Volume so far on a tunnel that is still open.
+    ///
+    /// A tunnel reports its byte counts when it closes, so a run killed with a
+    /// transfer in flight recorded the attempt and nothing about what crossed.
+    /// "How much left the sandbox" is the first question after a suspected
+    /// exfiltration, and for the case where that question matters most — a run
+    /// stopped mid-transfer — the answer was absent. These bound the unknown
+    /// to one interval instead of the whole transfer.
+    pub fn tunnel_progress(
+        &self,
+        host: &str,
+        port: u16,
+        bytes_sent: u64,
+        bytes_received: u64,
+        duration_ms: u64,
+    ) {
+        let _ = self.write(serde_json::json!({
+            "ts": iso8601_now(),
+            "event": "egress.tunnel_progress",
+            "host": sanitize(host),
+            "port": port,
+            "bytes_sent": bytes_sent,
+            "bytes_received": bytes_received,
+            "duration_ms": duration_ms,
+            "outcome": "open",
+        }));
     }
 
     /// Write a final summary if anything was dropped.
@@ -324,7 +386,7 @@ mod tests {
         }
         // The attempt that matters must still be recordable afterwards.
         assert!(
-            rec.attempt("example.com", 443, true, "allowlisted", "connect"),
+            rec.attempt("example.com", 443, true, "allowlisted", "connect", None),
             "an attempt must still be recordable after a saturation flood"
         );
 
@@ -350,7 +412,7 @@ mod tests {
         // Spend the per-second window on real attempts.
         let mut recorded = 0;
         for _ in 0..MAX_PER_SECOND {
-            if rec.attempt("example.com", 443, true, "allowlisted", "connect") {
+            if rec.attempt("example.com", 443, true, "allowlisted", "connect", None) {
                 recorded += 1;
             }
         }
@@ -358,7 +420,7 @@ mod tests {
         // The next one cannot be written, and must say so rather than
         // returning quietly while the caller forwards the traffic.
         assert!(
-            !rec.attempt("example.com", 443, true, "allowlisted", "connect"),
+            !rec.attempt("example.com", 443, true, "allowlisted", "connect", None),
             "an attempt over budget must report failure"
         );
         assert!(std::fs::read_to_string(&path)
@@ -374,6 +436,77 @@ mod tests {
         assert!(ts.ends_with("+00:00"), "{ts}");
         assert!(ts.starts_with("20"), "{ts}");
     }
+
+    /// A fresh directory per test, named so two tests cannot collide.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("wl-rec-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("egress.jsonl");
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn the_resolved_address_is_recorded_only_when_one_was_chosen() {
+        // Its absence is information: it means the guard never picked an
+        // address, so there is nothing to join against a firewall log.
+        let path = scratch("resolved");
+        let rec = Recorder::create(&path).unwrap();
+
+        assert!(rec.attempt(
+            "example.com", 443, true, "allowlisted", "connect",
+            Some("203.0.113.7".parse().unwrap()),
+        ));
+        assert!(rec.attempt("blocked.test", 443, false, "not allowlisted", "connect", None));
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert!(lines[0].contains(r#""resolved_ip":"203.0.113.7""#));
+        assert!(
+            !lines[1].contains("resolved_ip"),
+            "a record with no chosen address must omit the field, not carry a null"
+        );
+    }
+
+    #[test]
+    fn a_request_that_could_not_be_parsed_is_still_recorded() {
+        // The hole this closes: a head that timed out or carried no request
+        // line got a status code and left no trace, so the bundle could not
+        // tell "no malformed requests" from "ten thousand of them".
+        let path = scratch("malformed");
+        let rec = Recorder::create(&path).unwrap();
+
+        assert!(rec.malformed("request head timed out", 0));
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains(r#""egress.malformed""#));
+        assert!(body.contains(r#""verdict":"deny""#));
+        assert!(
+            !body.contains(r#""host""#),
+            "no host was parsed, so none may be claimed: the field a reviewer \
+             reads as a destination must not carry an attacker-chosen string"
+        );
+    }
+
+    #[test]
+    fn an_open_tunnel_reports_volume_before_it_closes() {
+        // So a run killed mid-transfer records what crossed, rather than only
+        // that a connection was allowed.
+        let path = scratch("progress");
+        let rec = Recorder::create(&path).unwrap();
+
+        rec.tunnel_progress("example.com", 443, 4096, 128, 300_000);
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains(r#""egress.tunnel_progress""#));
+        assert!(body.contains(r#""bytes_sent":4096"#));
+        assert!(
+            body.contains(r#""outcome":"open""#),
+            "a progress record must not be mistakable for a closed tunnel's total"
+        );
+    }
+
 }
 
 impl Recorder {

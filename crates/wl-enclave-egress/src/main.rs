@@ -60,6 +60,22 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest a single tunnel may stay open.
 const TUNNEL_MAX_LIFETIME: Duration = Duration::from_secs(3_600);
 
+/// How often an open tunnel reports the volume it has carried so far.
+///
+/// Bounds what a run killed mid-transfer fails to record. Five minutes rather
+/// than a tighter interval because the cost is paid in evidence records by
+/// every long-lived connection, and the question these answer — the order of
+/// magnitude of what left — does not get a better answer from finer sampling.
+const TUNNEL_PROGRESS_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Most progress records one tunnel may contribute.
+///
+/// A tunnel cannot outlive TUNNEL_MAX_LIFETIME, so this is reached only by a
+/// connection held open for its whole hour. Capped anyway: a budget spent on
+/// one connection's progress is a budget unavailable to the next connection's
+/// attempt, and an attempt is the more important record.
+const MAX_TUNNEL_PROGRESS: u32 = 12;
+
 /// Concurrent connections served. Beyond this, new sockets wait rather than
 /// being accepted and starved, which keeps file descriptors bounded.
 const MAX_CONNECTIONS: usize = 256;
@@ -243,11 +259,25 @@ async fn serve(
 ) -> std::io::Result<()> {
     let head = match timeout(HEAD_TIMEOUT, read_head(&mut client)).await {
         Ok(Ok(head)) => head,
-        Ok(Err(err)) => return Err(err),
-        Err(_) => return respond(&mut client, 408, "Request Timeout").await,
+        Ok(Err(err)) => {
+            // Recorded before the error is returned. A connection the sandbox
+            // opened and the guard could not parse is still an attempt to
+            // leave, and returning early was the one path that left none.
+            let _ = guard
+                .recorder
+                .malformed(&format!("request head unreadable: {err}"), 0);
+            return Err(err);
+        }
+        Err(_) => {
+            let _ = guard.recorder.malformed("request head timed out", 0);
+            return respond(&mut client, 408, "Request Timeout").await;
+        }
     };
 
     let Some(request_line) = head.lines().next() else {
+        let _ = guard
+            .recorder
+            .malformed("request head carried no request line", head.len());
         return respond(&mut client, 400, "Bad Request").await;
     };
     let mut parts = request_line.split_whitespace();
@@ -260,7 +290,7 @@ async fn serve(
         // TLS. Refusing is the smaller attack surface.
         let _ = guard
             .recorder
-            .attempt(target, 0, false, "non-CONNECT request refused", "http");
+            .attempt(target, 0, false, "non-CONNECT request refused", "http", None);
         return respond(&mut client, 405, "Method Not Allowed").await;
     }
 
@@ -269,13 +299,13 @@ async fn serve(
     let Some((host, port)) = target.rsplit_once(':') else {
         let _ = guard
             .recorder
-            .attempt(target, 0, false, "CONNECT target is not host:port", "connect");
+            .attempt(target, 0, false, "CONNECT target is not host:port", "connect", None);
         return respond(&mut client, 400, "Bad Request").await;
     };
     let Ok(port) = port.parse::<u16>() else {
         let _ = guard
             .recorder
-            .attempt(host, 0, false, "CONNECT port is not a number", "connect");
+            .attempt(host, 0, false, "CONNECT port is not a number", "connect", None);
         return respond(&mut client, 400, "Bad Request").await;
     };
     let host = host.trim_start_matches('[').trim_end_matches(']');
@@ -285,7 +315,7 @@ async fn serve(
     if !verdict.allowed {
         let _ = guard
             .recorder
-            .attempt(host, port, false, &verdict.reason, "connect");
+            .attempt(host, port, false, &verdict.reason, "connect", None);
         // The client is told only that it was refused. The reason is evidence,
         // not a reconnaissance oracle for code running inside the sandbox.
         return respond(&mut client, 403, "Forbidden").await;
@@ -303,26 +333,33 @@ async fn serve(
         Ok(Err(err)) => {
             let _ = guard
                 .recorder
-                .attempt(host, port, false, &format!("DNS lookup failed: {err}"), "connect");
+                .attempt(host, port, false, &format!("DNS lookup failed: {err}"), "connect", None);
             return respond(&mut client, 502, "Bad Gateway").await;
         }
         Err(_) => {
             let _ = guard
                 .recorder
-                .attempt(host, port, false, "DNS lookup timed out", "connect");
+                .attempt(host, port, false, "DNS lookup timed out", "connect", None);
             return respond(&mut client, 504, "Gateway Timeout").await;
         }
     };
 
     let mut target_addr = None;
     let mut refusal = None;
+    let mut refused_ip = None;
     for addr in &resolved {
         match netguard::check(addr.ip()) {
             Ok(()) => {
                 target_addr = Some(*addr);
                 break;
             }
-            Err(why) => refusal = Some(why),
+            Err(why) => {
+                refusal = Some(why);
+                // Kept so the record names the address that was refused. The
+                // hostname alone does not say what it pointed at, and for a
+                // rebinding attempt that is the whole finding.
+                refused_ip = Some(addr.ip());
+            }
         }
     }
 
@@ -330,7 +367,7 @@ async fn serve(
         let reason = refusal
             .map(|r| format!("allowlisted host resolved to a refused address: {}", r.reason()))
             .unwrap_or_else(|| "host did not resolve".to_string());
-        let _ = guard.recorder.attempt(host, port, false, &reason, "connect");
+        let _ = guard.recorder.attempt(host, port, false, &reason, "connect", refused_ip);
         return respond(&mut client, 403, "Forbidden").await;
     };
 
@@ -340,13 +377,13 @@ async fn serve(
         Ok(Err(err)) => {
             let _ = guard
                 .recorder
-                .attempt(host, port, false, &format!("upstream unreachable: {err}"), "connect");
+                .attempt(host, port, false, &format!("upstream unreachable: {err}"), "connect", Some(addr.ip()));
             return respond(&mut client, 502, "Bad Gateway").await;
         }
         Err(_) => {
             let _ = guard
                 .recorder
-                .attempt(host, port, false, "upstream connect timed out", "connect");
+                .attempt(host, port, false, "upstream connect timed out", "connect", Some(addr.ip()));
             return respond(&mut client, 504, "Gateway Timeout").await;
         }
     };
@@ -358,7 +395,7 @@ async fn serve(
     // bundle still read "attested, no attempts".
     if !guard
         .recorder
-        .attempt(host, port, true, &verdict.reason, "connect")
+        .attempt(host, port, true, &verdict.reason, "connect", Some(addr.ip()))
     {
         return respond(&mut client, 503, "Service Unavailable").await;
     }
@@ -398,12 +435,40 @@ async fn tunnel(
     let up = pump(&mut client_read, &mut upstream_write, sent.clone());
     let down = pump(&mut upstream_read, &mut client_write, received.clone());
 
+    // Reports volume while the tunnel is open. Never completes, so it cannot
+    // win the select! below and end a live tunnel; it stops recording once it
+    // has spent its allowance but goes on sleeping.
+    let progress = {
+        let guard = guard.clone();
+        let sent = sent.clone();
+        let received = received.clone();
+        let host = host.to_string();
+        async move {
+            let mut written = 0u32;
+            loop {
+                tokio::time::sleep(TUNNEL_PROGRESS_INTERVAL).await;
+                if written >= MAX_TUNNEL_PROGRESS {
+                    continue;
+                }
+                written += 1;
+                guard.recorder.tunnel_progress(
+                    &host,
+                    port,
+                    sent.load(Ordering::Relaxed),
+                    received.load(Ordering::Relaxed),
+                    started.elapsed().as_millis() as u64,
+                );
+            }
+        }
+    };
+
     let outcome = match timeout(TUNNEL_MAX_LIFETIME, async {
         // Either direction finishing ends the tunnel: once one side is done the
         // other has nobody to talk to.
         tokio::select! {
             r = up => r,
             r = down => r,
+            () = progress => unreachable!("the progress reporter never finishes"),
         }
     })
     .await

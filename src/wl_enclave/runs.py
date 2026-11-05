@@ -22,7 +22,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 #: Directory under the project root that holds every run.
 RUNS_DIR = "runs"

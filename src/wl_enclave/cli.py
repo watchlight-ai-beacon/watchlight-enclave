@@ -210,7 +210,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if purpose:
         _say(f"purpose: {purpose}")
 
-    chain = evidence.ChainWriter(run.bundle_dir)
+    try:
+        chain = evidence.ChainWriter(run.bundle_dir)
+    except evidence.BrokenChain as exc:
+        return _fail(
+            f"refusing to start: {exc}. A fresh run directory should hold no "
+            f"chain at all, so this one was either reused or edited"
+        )
     chain.append(
         "run.open",
         {
@@ -420,7 +426,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "decisions": len(decisions),
                 "allow": allows, "deny": denies, "needs_approval": holds,
                 "egress_attempts": len(attempts),
+                # Counted separately from attempts on purpose. A malformed head
+                # named no destination, so folding it into egress_attempts
+                # would inflate a number a reviewer reads as "connections the
+                # agent tried to make to somewhere".
+                "egress_malformed": len(_of("egress.malformed")),
                 "egress_tunnels": len(_of("egress.tunnel")),
+                "egress_tunnel_progress_notes": len(_of("egress.tunnel_progress")),
                 "egress_saturated_notes": len(_of("egress.saturated")),
                 "egress_records_suppressed": len(suppressions),
                 "egress_records_dropped": records_dropped,
@@ -531,14 +543,28 @@ def _cmd_kill(args: argparse.Namespace) -> int:
         return _fail(str(exc))
     sandbox = Sandbox(id=sandbox_id, name=meta.get("name", ""), driver=driver.name)
 
-    chain = evidence.ChainWriter(run.bundle_dir)
+    # Contained first, recorded second. The chain is now verified before it is
+    # extended, which means opening it can fail — and an operator reaching for
+    # kill wants the agent stopped whether or not its evidence is intact.
+    # Making containment wait on a successful read of the chain would hand an
+    # agent that corrupted its own bundle a way to stay running.
     driver.quarantine(sandbox)
+    action = "quarantined" if args.quarantine else "killed"
+    try:
+        chain = evidence.ChainWriter(run.bundle_dir)
+    except evidence.BrokenChain as exc:
+        _say(f"{action} {run.id}")
+        return _fail(
+            f"the bundle could not be sealed: {exc}. The sandbox was "
+            f"{action}; the existing chain is left exactly as found, because "
+            f"overwriting it would destroy the evidence of whatever broke it"
+        )
     chain.append(
         "run.contained",
         {"reason": "operator", "command": "quarantine" if args.quarantine else "kill"},
     )
     chain.seal({"run": run.id, "agent": meta.get("agent"), "runtime": driver.name})
-    _say(f"{'quarantined' if args.quarantine else 'killed'} {run.id}; bundle sealed")
+    _say(f"{action} {run.id}; bundle sealed")
     return 0
 
 

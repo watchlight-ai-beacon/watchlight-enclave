@@ -42,9 +42,16 @@ EGRESS_ATTESTED = "egress.attested"
 
 #: The record type every guard appends to the evidence chain. One per attempt.
 #:
-#: ``{"host", "port", "verdict", "reason", "protocol", "ts"}`` — ``verdict`` is
+#: ``{"host", "port", "verdict", "reason", "protocol", "ts"}``, plus
+#: ``resolved_ip`` when an address was actually chosen — ``verdict`` is
 #: ``"allow"`` or ``"deny"``. No request body, no headers, no credentials: a
 #: record says *where* and *whether*, never *what*.
+#:
+#: ``resolved_ip`` is present only when the guard picked an address, so its
+#: absence is information too. The hostname is what the allowlist decides on
+#: and it is not where the traffic went: a name can resolve differently between
+#: the decision and the next lookup, and an investigator joining this bundle
+#: against a firewall or netflow log has only the address in common.
 EGRESS_RECORD = "egress.attempt"
 
 #: Every chain record type a guard is permitted to contribute.
@@ -56,7 +63,9 @@ EGRESS_RECORD = "egress.attempt"
 #: — inside a chain that would then hash the forgery faithfully.
 GUARD_RECORD_TYPES = frozenset({
     "egress.attempt",
+    "egress.malformed",
     "egress.tunnel",
+    "egress.tunnel_progress",
     "egress.records_suppressed",
     "egress.saturated",
 })
