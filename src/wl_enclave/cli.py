@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import __version__, config, evidence, runs
-from .drivers import DriverError, Mount, SandboxSpec, get_driver
+from .drivers import Egress, DriverError, Mount, SandboxSpec, get_driver
 from .egress import (
     EGRESS_UNRECOGNISED,
     GUARD_RECORD_TYPES,
@@ -247,7 +247,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # somewhere to send traffic the moment it starts.
     guard = None
     egress_env: dict[str, str] = {}
-    sandbox_network = "none"
+    sandbox_egress = Egress.none()
     if cfg.egress_allow:
         try:
             guard = get_guard("local")
@@ -258,6 +258,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             endpoint = guard.start(run.id, Allowlist(cfg.egress_allow), run.egress_file)
             egress_env = endpoint.env
             sandbox_network = guard.network() or "none"
+            sandbox_egress = Egress.mediated_by(
+                sandbox_network,
+                f"{endpoint.host}:{endpoint.port}",
+                cfg.egress_allow,
+            )
             chain.append(
                 "egress.guard_started",
                 {
@@ -304,7 +309,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         ],
         # Either an internal network whose only way out is the guard, or no
         # network at all. Never a default bridge.
-        network=sandbox_network,
+        egress=sandbox_egress,
         memory_bytes=cfg.limits.memory_bytes,
         cpus=cfg.limits.cpus,
         pids=cfg.limits.pids,

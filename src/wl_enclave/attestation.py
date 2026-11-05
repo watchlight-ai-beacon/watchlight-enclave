@@ -44,6 +44,7 @@ __all__ = [
     "TOPOLOGY",
     "NETWORK_UNROUTABLE",
     "SANDBOX_SINGLE_NETWORK",
+    "SANDBOX_ON_INTENDED_NETWORK",
     "GUARD_ATTACHED",
     "GUARD_HAS_EGRESS",
     "GUARD_LIVE",
@@ -82,6 +83,7 @@ TOPOLOGY = "network_topology"
 
 NETWORK_UNROUTABLE = "network_unroutable"
 SANDBOX_SINGLE_NETWORK = "sandbox_single_network"
+SANDBOX_ON_INTENDED_NETWORK = "sandbox_on_intended_network"
 GUARD_ATTACHED = "guard_attached"
 GUARD_HAS_EGRESS = "guard_has_egress"
 GUARD_LIVE = "guard_live_at_readback"

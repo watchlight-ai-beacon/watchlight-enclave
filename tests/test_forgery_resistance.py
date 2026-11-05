@@ -485,11 +485,12 @@ def test_the_spec_derives_the_host_path_a_mask_hides():
 
 def test_incoherent_mounts_reports_every_problem_without_raising():
     """So a caller can report them all at once, the way config.load does."""
-    from wl_enclave.drivers import Mount, SandboxSpec
+    from wl_enclave.drivers import Egress, Mount, SandboxSpec
 
     # Built field-by-field to bypass __post_init__, which is what a caller
     # wanting to report rather than raise would do.
     spec = SandboxSpec.__new__(SandboxSpec)
+    object.__setattr__(spec, "egress", Egress.none())
     object.__setattr__(spec, "mounts", [
         Mount.bind(Path("/proj"), "/work"),
         Mount.mask("/work"),
@@ -575,3 +576,42 @@ def test_an_intact_chain_still_resumes(tmp_path):
     result = evidence.verify(bundle)
     assert result.ok is True
     assert result.records == 3
+
+
+# -- egress intent is declared, so the driver can check it ----------------
+
+def test_a_mediated_egress_must_name_a_network():
+    """Intent that contradicts itself is refused where it is written."""
+    from wl_enclave.drivers import DriverError, Egress, SandboxSpec
+
+    with pytest.raises(DriverError, match="names no network"):
+        SandboxSpec(
+            name="n", image="i", command=["c"],
+            egress=Egress(network="none", mediated=True),
+        )
+
+
+def test_an_endpoint_without_mediation_is_refused():
+    """The combination that would attest a sandbox as governed when it is not.
+
+    A sandbox pointed at a guard it is not *required* to go through looks
+    identical, in a bundle, to one whose only route is that guard.
+    """
+    from wl_enclave.drivers import DriverError, Egress, SandboxSpec
+
+    with pytest.raises(DriverError, match="not marked mediated"):
+        SandboxSpec(
+            name="n", image="i", command=["c"],
+            egress=Egress(network="br0", endpoint="10.0.0.2:8080", mediated=False),
+        )
+
+
+def test_the_allowlist_travels_with_the_intent():
+    """A bundle stating the topology without the policy describes half a boundary."""
+    from wl_enclave.drivers import Egress
+
+    e = Egress.mediated_by("wl-net", "10.0.0.2:8080", ["b.test:443", "a.test:443"])
+    assert e.mediated is True
+    assert e.allow == ("a.test:443", "b.test:443"), "sorted, so it is comparable"
+    assert Egress.none().mediated is False
+    assert Egress.none().network == "none"

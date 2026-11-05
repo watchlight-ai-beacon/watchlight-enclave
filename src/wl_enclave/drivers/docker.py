@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import attestation
-from . import DriverError, Sandbox, SandboxSpec
+from . import DriverError, Egress, Sandbox, SandboxSpec
 
 #: Ceiling on any single docker invocation that is not expected to block.
 _CALL_TIMEOUT = 60
@@ -48,6 +48,10 @@ class DockerDriver:
         #: Canary files planted behind those masks: in-container path -> host
         #: path. Read back in attest() and removed there.
         self._canaries: dict[str, dict[str, Path]] = {}
+        #: The egress intent each sandbox was provisioned with, so attest() can
+        #: check the sandbox against what was asked for rather than against
+        #: whatever it finds attached.
+        self._egress: dict[str, Egress] = {}
         self.name = binary
         self._bin = binary
 
@@ -139,7 +143,7 @@ class DockerDriver:
             # because a read-only root breaks most programs otherwise, and it
             # is mounted noexec so it cannot become a staging area for code
             # the image never shipped.
-            "--network", spec.network,
+            "--network", spec.egress.network,
             "--read-only",
             "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
             "--cap-drop", "ALL",
@@ -185,6 +189,7 @@ class DockerDriver:
         # only report what tmpfs mounts exist, which is not the same question.
         self._masks[container_id] = declared_masks
         self._canaries[container_id] = self._plant_canaries(spec, declared_masks)
+        self._egress[container_id] = spec.egress
         return Sandbox(id=container_id, name=spec.name, driver=self.name)
 
     def _plant_canaries(
@@ -284,10 +289,10 @@ class DockerDriver:
                 }
                 for m in (inspected.get("Mounts") or [])
             ],
-            "controls": self._controls(sandbox, host),
+            "controls": self._controls(sandbox, host, inspected),
         }
 
-    def _controls(self, sandbox: Sandbox, host: dict) -> dict:
+    def _controls(self, sandbox: Sandbox, host: dict, inspected: dict) -> dict:
         """Each isolation setting named, with how its state was established.
 
         The constraints block above already lists the settings. This says, for
@@ -298,6 +303,7 @@ class DockerDriver:
         """
         tmpfs = set((host.get("Tmpfs") or {}).keys())
         declared = self._masks.get(sandbox.id, [])
+        intent = self._egress.get(sandbox.id, Egress())
         missing = [path for path in declared if path not in tmpfs]
         cap_drop = [c.upper() for c in (host.get("CapDrop") or [])]
         security_opt = host.get("SecurityOpt") or []
@@ -324,6 +330,38 @@ class DockerDriver:
             # the mask against the container's own mount table is the stronger
             # claim and is not made here.
             attestation.EVIDENCE_MASKED: self._mask_control(sandbox, declared, missing),
+            **self._network_control(inspected, intent),
+        }
+
+    def _network_control(self, inspected: dict, intent: Egress) -> dict:
+        """Whether the sandbox is on the network its spec asked for.
+
+        Checked against the declared intent rather than against whatever is
+        attached. Reporting "one network, named X" is not the same claim as
+        "the network asked for, and nothing else": the second catches a
+        sandbox that came up on a bridge because a network creation failed and
+        something fell back, which is the case worth catching.
+        """
+        attached = sorted(
+            ((inspected.get("NetworkSettings") or {}).get("Networks") or {}).keys()
+        )
+        if not intent.mediated:
+            # Nothing was promised, so there is nothing to verify beyond the
+            # absence the topology already guarantees.
+            return {}
+        if attached != [intent.network]:
+            return {
+                attestation.SANDBOX_ON_INTENDED_NETWORK: attestation.control(
+                    False,
+                    attestation.RUNTIME_CONFIG,
+                    f"asked for {intent.network!r}, attached to "
+                    + (", ".join(attached) or "nothing"),
+                )
+            }
+        return {
+            attestation.SANDBOX_ON_INTENDED_NETWORK: attestation.control(
+                True, attestation.RUNTIME_CONFIG, f"only {intent.network}"
+            )
         }
 
     def _mask_control(

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
 __all__ = [
+    "Egress",
     "Mount",
     "SandboxSpec",
     "Sandbox",
@@ -76,6 +77,53 @@ class Mount:
 
 
 @dataclass(frozen=True)
+class Egress:
+    """How a sandbox may reach the network, if at all.
+
+    A bare network name does not carry the intent. ``"none"`` and
+    ``"wl-enclave-<run>"`` are both just strings, and nothing in a string says
+    whether a named network is an internal one whose only route out is a guard
+    or an ordinary bridge with a default route to the internet. A driver handed
+    only the name cannot tell the difference, so it cannot refuse the wrong one
+    and cannot attest the right one as anything stronger than "a network was
+    attached".
+
+    Stating the intent separately means the driver is checking the sandbox
+    against what was *asked for* rather than reporting what it happens to find.
+    """
+
+    #: Runtime network to attach, or ``"none"`` for no network at all.
+    network: str = "none"
+    #: True when this network's only route out is an allowlisting guard. The
+    #: driver is expected to verify that claim, not take it.
+    mediated: bool = False
+    #: ``host:port`` of the guard, recorded so a reviewer can tell which
+    #: endpoint the sandbox was pointed at.
+    endpoint: str = ""
+    #: The allowlist the guard was given. Carried here because it is part of
+    #: what the run was permitted to do, and a bundle that states the topology
+    #: without the policy describes only half the boundary.
+    allow: tuple[str, ...] = ()
+
+    @classmethod
+    def none(cls) -> "Egress":
+        """No network. The default, and the only thing that needs no proof."""
+        return cls()
+
+    @classmethod
+    def mediated_by(
+        cls, network: str, endpoint: str, allow: list[str]
+    ) -> "Egress":
+        """A network whose only route out is the given guard."""
+        return cls(
+            network=network,
+            mediated=True,
+            endpoint=endpoint,
+            allow=tuple(sorted(allow)),
+        )
+
+
+@dataclass(frozen=True)
 class SandboxSpec:
     """What to provision. Driver-neutral by construction.
 
@@ -93,7 +141,10 @@ class SandboxSpec:
     #: destination path length — so this list is for the reader and for the
     #: coherence check below, not for the runtime.
     mounts: list[Mount] = field(default_factory=list)
-    network: str = "none"
+    #: How this sandbox may reach the network. Replaces a bare network name,
+    #: which could not distinguish an internal guard-only network from a
+    #: bridge — see :class:`Egress`.
+    egress: Egress = field(default_factory=Egress)
     memory_bytes: int = 2 * 1024**3
     cpus: float = 2.0
     pids: int = 512
@@ -115,6 +166,17 @@ class SandboxSpec:
         runtime reports the mask as requested either way.
         """
         problems: list[str] = []
+        if self.egress.mediated and self.egress.network in ("", "none"):
+            problems.append(
+                "egress claims to be guard-mediated but names no network; "
+                "a mediated route has to run through something"
+            )
+        if not self.egress.mediated and self.egress.endpoint:
+            problems.append(
+                f"egress names an endpoint ({self.egress.endpoint}) but is not "
+                f"marked mediated; a sandbox pointed at a guard it is not "
+                f"required to go through would be attested as if it were"
+            )
         binds = [m for m in self.mounts if not m.masked]
         bind_targets = [posixpath.normpath(m.target) for m in binds]
 
