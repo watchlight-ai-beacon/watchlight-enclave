@@ -95,6 +95,7 @@ letting you assume otherwise.
 | `src/wl_enclave/egress/` | egress guards behind one `EgressGuard` protocol |
 | `crates/wl-enclave-egress/` | the guard itself: a CONNECT allowlist in Rust |
 | `docs/` | quickstart and reference |
+| `docs/design/` | how it is built and why: trust boundaries, evidence, attestation, egress, drivers, limits |
 | `examples/` | runnable agents with policies |
 
 ## Open source, and the license

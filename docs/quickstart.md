@@ -315,6 +315,10 @@ only one match.
 
 ## Next
 
+- [`docs/design/`](design/README.md) — how Enclave is built and why: the trust
+  boundaries, what the evidence chain does and does not prove, how each
+  attested control records the strength of its own evidence, and what a second
+  runtime driver has to deliver.
 - [`examples/coder`](../examples/coder/README.md) — the misbehaving agent from
   this guide, with a note on which layer stops each of its five attempts and
   some suggestions for breaking it on purpose, including breaking the
