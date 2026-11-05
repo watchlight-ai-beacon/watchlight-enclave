@@ -7,13 +7,22 @@ import json
 
 import pytest
 
-from wl_enclave import evidence
+from wl_enclave import attestation, evidence
 
 
 def build(tmp_path, records):
+    """Seal a bundle from ``records``, ending it the way a real run does.
+
+    A terminal record is appended unless the test supplies one, so each test's
+    record list stays about the thing it is testing. verify() now requires a
+    chain to say how its run ended — without that, a bundle holding only
+    run.open verified as OK, which made the emptiest bundle the cleanest.
+    """
     w = evidence.ChainWriter(tmp_path)
     for type_, data in records:
         w.append(type_, data)
+    if not any(t in evidence._TERMINAL_RECORDS for t, _ in records):
+        w.append("run.close", {"exit_status": 0})
     w.seal({"run": "t", "agent": "a", "runtime": "docker"})
     return tmp_path
 
@@ -23,7 +32,7 @@ RUN = [("run.open", {"run": "t"}), ("decision", {"verdict": "Deny"})]
 
 def test_an_untouched_bundle_verifies(tmp_path):
     r = evidence.verify(build(tmp_path, RUN))
-    assert r.ok and r.records == 2 and r.problems == []
+    assert r.ok and r.records == 3 and r.problems == []
 
 
 def test_an_edited_record_is_caught(tmp_path):
@@ -172,11 +181,17 @@ def test_a_guard_that_stopped_early_makes_the_bundle_incomplete(tmp_path):
     assert result.complete is False
     assert any("stopped before the run ended" in r for r in result.incomplete_reasons)
     assert result.problems == [], "a dead guard is not an integrity failure"
-    # The guard-stopped record weakens the guard_live control it had already
-    # attested as true, so the run also reads as uncontained: the witness was
-    # part of the containment, and it left.
-    assert result.contained is False
-    assert result.verdict == "uncontained"
+    # A dead guard is a WITNESSING failure, not a containment one, and the
+    # difference is the whole point of the verdict. On an internal network a
+    # guard that dies leaves the sandbox able to reach nothing at all — the run
+    # is strictly more contained and strictly less observed. Reporting it as
+    # uncontained sent an operator looking for an escaped agent, and spent the
+    # one alarm that should mean isolation failed.
+    assert result.contained is True, "the sandbox was not less isolated"
+    assert result.verdict == "incomplete"
+    assert "guard_live_at_readback" in attestation.failed_controls(
+        result.controls, attestation.WITNESSING
+    )
     # Attested and complete are different claims: the topology really was
     # exclusive, and the records are still an understatement.
     assert result.egress_attested is True

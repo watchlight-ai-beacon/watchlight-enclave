@@ -48,6 +48,9 @@ class DockerDriver:
         #: Canary files planted behind those masks: in-container path -> host
         #: path. Read back in attest() and removed there.
         self._canaries: dict[str, dict[str, Path]] = {}
+        #: An unmasked canary per sandbox, read to prove the sandbox is
+        #: observable before any conclusion is drawn from a failed read.
+        self._witness: dict[str, Optional[tuple[str, Path]]] = {}
         #: The egress intent each sandbox was provisioned with, so attest() can
         #: check the sandbox against what was asked for rather than against
         #: whatever it finds attached.
@@ -189,6 +192,7 @@ class DockerDriver:
         # only report what tmpfs mounts exist, which is not the same question.
         self._masks[container_id] = declared_masks
         self._canaries[container_id] = self._plant_canaries(spec, declared_masks)
+        self._witness[container_id] = self._plant_witness(spec)
         self._egress[container_id] = spec.egress
         return Sandbox(id=container_id, name=spec.name, driver=self.name)
 
@@ -228,6 +232,36 @@ class DockerDriver:
                 continue
             planted[posixpath.join(mask, canary.name)] = canary
         return planted
+
+    def _plant_witness(self, spec: SandboxSpec) -> Optional[tuple[str, Path]]:
+        """A canary at a path that is NOT masked, which must be readable.
+
+        The positive control. Without one, "the canary could not be read" and
+        "the sandbox could not be read" are the same observation, and the mask
+        check reported success for a container that had already exited, an
+        image with no ``cat``, or an exec that was refused. A claim that strong
+        must rest on a read that actually happened.
+        """
+        for mount in spec.mounts:
+            if mount.masked or mount.source is None:
+                continue
+            target = posixpath.normpath(mount.target)
+            # Skip a bind that a mask sits inside: a witness there could be
+            # hidden by the very mask it is meant to be independent of.
+            if any(
+                posixpath.normpath(m.target).startswith(target + "/")
+                for m in spec.mounts
+                if m.masked
+            ):
+                continue
+            host_path = Path(mount.source).resolve()
+            witness = host_path / f".wl-witness-{secrets.token_hex(8)}"
+            try:
+                witness.write_text("readable\n")
+            except OSError:
+                continue
+            return posixpath.join(target, witness.name), witness
+        return None
 
     def attest(self, sandbox: Sandbox) -> dict:
         """Read the sandbox's actual constraints back out of the runtime.
@@ -391,17 +425,48 @@ class DockerDriver:
                 + ", ".join(missing),
             )
 
+        # The positive control runs first. If a file that MUST be readable
+        # cannot be read, nothing was observed and no conclusion about the mask
+        # follows — the previous code could not tell that case from a mask
+        # working, and resolved it in favour of the strong answer.
+        witness = self._witness.pop(sandbox.id, None)
+        observable = False
+        witness_detail = "no unmasked path was available to probe"
+        if witness is not None:
+            in_container, host_path = witness
+            probe = self._run(
+                "exec", sandbox.id, "cat", in_container, check=False, timeout=30
+            )
+            observable = probe.returncode == 0
+            if not observable:
+                witness_detail = (
+                    f"a file that must be readable was not "
+                    f"(exit {probe.returncode}); the sandbox could not be "
+                    f"observed from outside"
+                )
+            try:
+                host_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
         canaries = self._canaries.get(sandbox.id) or {}
         readable = []
-        unreadable = []
+        hidden = []
+        inconclusive = []
         for in_container, host_path in canaries.items():
             probe = self._run(
                 "exec", sandbox.id, "cat", in_container, check=False, timeout=30
             )
+            # Exit codes, not truthiness. cat exits 1 for a file it cannot
+            # find — the mask working — and 126/127 when exec itself failed,
+            # which says nothing about the file. Treating every non-zero exit
+            # as "hidden" is what let an image without `cat` attest a mask.
             if probe.returncode == 0:
                 readable.append(in_container)
+            elif probe.returncode == 1:
+                hidden.append(in_container)
             else:
-                unreadable.append(in_container)
+                inconclusive.append(f"{in_container} (exit {probe.returncode})")
             try:
                 host_path.unlink(missing_ok=True)
             except OSError:
@@ -427,13 +492,23 @@ class DockerDriver:
                 if len(parts) >= 3 and parts[2] == "tmpfs":
                     mounted.append(parts[1])
 
-        if not unreadable:
-            # No canary could be planted or read back, so nothing was actually
-            # observed from inside. Say that rather than imply an observation.
+        if not observable:
             return attestation.control(
                 None, attestation.RUNTIME_CONFIG,
-                "present in the runtime's record; not confirmed from inside "
-                "the sandbox (no canary could be read back)",
+                f"present in the runtime's record; not confirmed from inside "
+                f"the sandbox ({witness_detail})",
+            )
+        if inconclusive:
+            return attestation.control(
+                None, attestation.READBACK,
+                "a canary probe failed for a reason unrelated to the mask: "
+                + ", ".join(sorted(inconclusive)),
+            )
+        if not hidden:
+            return attestation.control(
+                None, attestation.RUNTIME_CONFIG,
+                "present in the runtime's record; no canary could be planted "
+                "behind it, so the mask was not tested",
             )
 
         # Compared in normalised form because the kernel records the mount
@@ -441,11 +516,16 @@ class DockerDriver:
         mounted_norm = {posixpath.normpath(m) for m in mounted}
         unmounted = [m for m in declared if posixpath.normpath(m) not in mounted_norm]
         if mounts.returncode != 0:
-            detail = (
+            # Was the fall-through to in_force=True, which claimed the
+            # strongest provenance in the vocabulary while saying in its own
+            # detail string that it had read nothing.
+            return attestation.control(
+                None, attestation.READBACK,
                 "a canary planted behind every mask was unreadable from "
-                "inside the sandbox; the mount table could not be read"
+                "inside the sandbox, but the mount table could not be read, "
+                "so what is hiding it is unconfirmed",
             )
-        elif unmounted:
+        if unmounted:
             # The canary is hidden but no tmpfs is mounted where we asked, so
             # something other than our mask is doing the hiding.
             return attestation.control(
@@ -453,13 +533,13 @@ class DockerDriver:
                 "the canary was unreadable, but the sandbox's mount table "
                 "shows no tmpfs at " + ", ".join(unmounted),
             )
-        else:
-            detail = (
-                "a tmpfs is mounted at every declared path in the sandbox's "
-                "own mount table, and a canary planted behind each one was "
-                "unreadable from inside"
-            )
-        return attestation.control(True, attestation.READBACK, detail)
+        return attestation.control(
+            True, attestation.READBACK,
+            "a tmpfs is mounted at every declared path in the sandbox's own "
+            "mount table; a canary planted behind each one was unreadable "
+            "from inside, and an unmasked canary was readable in the same "
+            "probe round",
+        )
 
     def wait(self, sandbox: Sandbox, timeout_seconds: int) -> Optional[int]:
         """Block until the sandbox exits; ``None`` if it outlived the timeout."""

@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from . import __version__, config, evidence, runs
+from . import __version__, attestation, config, evidence, runs
 from .drivers import Egress, DriverError, Mount, SandboxSpec, get_driver
 from .egress import (
     EGRESS_UNRECOGNISED,
@@ -282,50 +282,62 @@ def _cmd_run(args: argparse.Namespace) -> int:
             chain.seal({"run": run.id, "agent": cfg.agent.name, "runtime": cfg.runtime})
             return _fail(f"egress guard: {exc}")
 
-    spec = SandboxSpec(
-        name=f"wl-enclave-{run.id}",
-        image=image,
-        command=cfg.agent.command,
-        env={
-            **egress_env,
-            # Watchlight writes its decision trail here; the bind mount below
-            # is what carries it back out to the host.
-            "WATCHLIGHT_AUDIT_DIR": AUDIT_DIR_IN_SANDBOX,
-            "WL_ENCLAVE_RUN": run.id,
-            "WL_ENCLAVE_PURPOSE": purpose,
-            "WL_ENCLAVE_AGENT": cfg.agent.name,
-            "WL_ENCLAVE_POLICY": "/policy",
-        },
-        # Binds and masks in one list, ordered so it reads as what the sandbox
-        # sees: the workspace, then the hole punched in it. The workspace is
-        # the project root and the run directory lives inside it, so without
-        # the mask the agent could reach /work/runs/<id>/bundle and rewrite the
-        # chain describing itself while the run was still going.
-        mounts=[
-            Mount.bind(cfg.root, "/work", read_only=False),
-            *_mask_for_runs(cfg.root, cfg.root / runs.RUNS_DIR),
-            Mount.bind(cfg.policy, "/policy", read_only=True),
-            Mount.bind(run.evidence_dir, AUDIT_DIR_IN_SANDBOX, read_only=False),
-        ],
-        # Either an internal network whose only way out is the guard, or no
-        # network at all. Never a default bridge.
-        egress=sandbox_egress,
-        memory_bytes=cfg.limits.memory_bytes,
-        cpus=cfg.limits.cpus,
-        pids=cfg.limits.pids,
-    )
+    def build_spec() -> SandboxSpec:
+        """Built inside the try below, not before it.
+
+        SandboxSpec.__post_init__ raises DriverError on an incoherent mount or
+        egress declaration. Constructed before the try whose finally stops the
+        guard, that raise leaked the guard container and its docker network,
+        left the chain unsealed, and exited through a traceback — main() catches
+        only KeyboardInterrupt. The spec is cheap to build and the guard is
+        already running by this point, so it belongs inside the cleanup.
+        """
+        return SandboxSpec(
+                name=f"wl-enclave-{run.id}",
+            image=image,
+            command=cfg.agent.command,
+            env={
+                **egress_env,
+                # Watchlight writes its decision trail here; the bind mount below
+                # is what carries it back out to the host.
+                "WATCHLIGHT_AUDIT_DIR": AUDIT_DIR_IN_SANDBOX,
+                "WL_ENCLAVE_RUN": run.id,
+                "WL_ENCLAVE_PURPOSE": purpose,
+                "WL_ENCLAVE_AGENT": cfg.agent.name,
+                "WL_ENCLAVE_POLICY": "/policy",
+            },
+            # Binds and masks in one list, ordered so it reads as what the sandbox
+            # sees: the workspace, then the hole punched in it. The workspace is
+            # the project root and the run directory lives inside it, so without
+            # the mask the agent could reach /work/runs/<id>/bundle and rewrite the
+            # chain describing itself while the run was still going.
+            mounts=[
+                Mount.bind(cfg.root, "/work", read_only=False),
+                *_mask_for_runs(cfg.root, cfg.root / runs.RUNS_DIR),
+                Mount.bind(cfg.policy, "/policy", read_only=True),
+                Mount.bind(run.evidence_dir, AUDIT_DIR_IN_SANDBOX, read_only=False),
+            ],
+            # Either an internal network whose only way out is the guard, or no
+            # network at all. Never a default bridge.
+            egress=sandbox_egress,
+            memory_bytes=cfg.limits.memory_bytes,
+            cpus=cfg.limits.cpus,
+            pids=cfg.limits.pids,
+        )
 
     sandbox = None
+
     try:
+        spec = build_spec()
         sandbox = driver.provision(spec)
         run.write_meta(
             run=run.id, agent=cfg.agent.name, purpose=purpose,
             runtime=cfg.runtime, sandbox=sandbox.id, name=sandbox.name,
         )
 
-        attestation = driver.attest(sandbox)
-        chain.append("sandbox.attested", attestation)
-        c = attestation["constraints"]
+        sandbox_attestation = driver.attest(sandbox)
+        chain.append("sandbox.attested", sandbox_attestation)
+        c = sandbox_attestation["constraints"]
         _say(
             f"sandbox {sandbox.id[:12]}  network={c['network_mode']}  "
             f"read-only-root={c['read_only_root']}  caps-dropped={','.join(c['cap_drop']) or 'none'}"
@@ -380,7 +392,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             # notice. Anything the sandbox attempted after the guard went down
             # was refused by absence rather than by policy, and is absent from
             # the file rather than denied in it.
-            final_state = guard.state() if hasattr(guard, "state") else {}
+            final_state = guard.state()
             if final_state and final_state.get("guard_running") is False:
                 guard_stopped_early = True
                 chain.append("egress.guard_stopped", final_state)
@@ -390,6 +402,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     f"are a lower bound"
                 )
 
+            # Drained before reading, so the guard's closing account — the
+            # only place the true suppression total, refusal count and
+            # write-error count exist — is in the file we are about to read.
+            guard.drain()
             egress = read_egress_records(run.egress_file)
             for record in egress:
                 # The type is chosen here, against a closed set, and is never
@@ -519,7 +535,11 @@ def _cmd_ps(args: argparse.Namespace) -> int:
                 run.id,
                 meta.get("agent", "-"),
                 str(result.records) if result.records else "-",
-                "ok" if result.ok else "FAILED",
+                # The verdict, not result.ok. ok means "chain intact", so
+                # this column read "ok" for uncontained and incomplete
+                # bundles — the product's central distinction missing from
+                # the product's main table.
+                result.verdict.upper() if result.verdict != "ok" else "ok",
                 (meta.get("purpose") or "")[:40],
             )
         )
@@ -630,6 +650,10 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         # two runs claim the same policy is entitled to check that claim, and
         # this is the value that settles it.
         _say(f"governed by {result.governed_by}")
+    # De-indented: this loop was nested under the governed_by check, so a
+    # bundle with no config.attested record printed "controls 8/10 in force"
+    # and never named the two that were not.
+    if result.controls:
         for name, entry in sorted(result.controls.items()):
             if entry.get("in_force") is True:
                 continue
@@ -665,10 +689,24 @@ def _cmd_evidence_export(args: argparse.Namespace) -> int:
     if run is None:
         return _fail(f"no run matching {args.run!r}", "list them with `wl-enclave ps`")
     result = evidence.verify(run.bundle_dir)
-    if not result.ok and not args.force:
+    # Gated on the verdict so an uncontained bundle needs --force too: a
+    # bundle reporting that isolation did not hold is not an archive-clean one.
+    if result.verdict != "ok" and not args.force:
         _say(f"refusing to export: bundle {result.summary}")
+        # Every reason, not just integrity problems. Gating on the verdict
+        # means uncontained and incomplete bundles are refused too, and those
+        # carry no entries in `problems` — so printing only that list gave a
+        # refusal with nothing under it.
         for problem in result.problems:
             print(f"            - {problem}")
+        for reason in result.incomplete_reasons:
+            print(f"            - {reason}")
+        for name in attestation.failed_controls(result.controls):
+            detail = (result.controls[name].get("detail") or "").strip()
+            print(
+                f"            - control {name} was not in force"
+                + (f": {detail}" if detail else "")
+            )
         return _fail("pass --force to export it anyway")
     out = Path(args.output or f"{run.id}-bundle")
     archive = shutil.make_archive(str(out), "gztar", root_dir=run.bundle_dir)
@@ -728,7 +766,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_exp = ev_sub.add_parser("export", help="archive a run's bundle")
     p_exp.add_argument("--run", required=True)
     p_exp.add_argument("--output", help="output path without extension")
-    p_exp.add_argument("--force", action="store_true", help="export even if verification fails")
+    p_exp.add_argument("--force", action="store_true", help="export even if the bundle does not verify as ok")
     p_exp.set_defaults(func=_cmd_evidence_export)
 
     return parser

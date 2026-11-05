@@ -239,6 +239,16 @@ class EgressGuard(Protocol):
         """
         ...
 
+    def drain(self) -> None:
+        """Let the guard write its closing account, and wait for it.
+
+        Separate from :meth:`stop` because the caller reads the record file
+        between the two: a guard killed outright can still be holding counts
+        that exist nowhere else, and those counts are what tell a reviewer the
+        size of the file's own gap.
+        """
+        ...
+
     def stop(self) -> None:
         """Tear the guard down, leaving its records in place."""
         ...

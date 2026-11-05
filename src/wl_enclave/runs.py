@@ -18,7 +18,9 @@ one directory whose contents are attacker-controlled, so ``guard/`` and
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -180,11 +182,39 @@ def read_decisions(audit_file: Path) -> tuple[list[dict], dict]:
     Tolerates a truncated final line: a sandbox killed mid-write leaves one,
     and losing the whole trail over it would defeat the point.
     """
-    account = {"malformed": 0, "truncated_fields": 0, "dropped_over_cap": 0}
-    if not Path(audit_file).is_file():
+    account = {
+        "malformed": 0,
+        "truncated_fields": 0,
+        "dropped_over_cap": 0,
+        "rejected_not_a_regular_file": 0,
+    }
+    path = Path(audit_file)
+    # Opened without following links. The sandbox owns the contents of this
+    # directory, so it can replace the audit file with a symlink and have the
+    # host read whatever it points at — a sibling bundle/chain.jsonl, for
+    # instance, which the sandbox is never supposed to reach. The read is
+    # bounded and field-filtered, so this was never a write or forgery
+    # primitive, but it made the documented boundary ("guard/ and bundle/ are
+    # kept out of the sandbox entirely") weaker for reads than it claims.
+    #
+    # O_NOFOLLOW fails on the final component being a link, which is the one
+    # the sandbox controls; the parent components are ours.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
         return [], account
+    except OSError:
+        # ELOOP (a symlink) or anything else that is not a plain open.
+        account["rejected_not_a_regular_file"] += 1
+        return [], account
+
     out: list[dict] = []
-    with Path(audit_file).open(encoding="utf-8") as fh:
+    with os.fdopen(fd, encoding="utf-8") as fh:
+        # Checked on the open descriptor, so there is no window between the
+        # test and the read for the file to be swapped.
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            account["rejected_not_a_regular_file"] += 1
+            return [], account
         for line in fh:
             line = line.strip()
             if not line:

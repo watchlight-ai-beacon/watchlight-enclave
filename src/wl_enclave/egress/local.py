@@ -210,9 +210,30 @@ class LocalEgressGuard:
         """The internal network the sandbox must join."""
         return self._network
 
+    def drain(self) -> None:
+        """Ask the guard to write its final account, and wait for it.
+
+        ``docker rm --force`` sends SIGKILL, so the guard's shutdown handler
+        never ran and ``Recorder::finish()`` was effectively dead code. That
+        mattered: the inline suppression note is latched after the first
+        suppressed write, so it is frozen at the count when the cap was first
+        crossed, while the accurate total — and the refusal and write-error
+        accounting — exist only in the final record. A run that dropped ten
+        thousand records reported one.
+
+        ``docker stop`` sends SIGTERM and waits, which is what the guard image
+        is built as PID 1 to receive. Called before the records are read, so
+        the account is in the file by then.
+        """
+        if self._container:
+            self._run("stop", "--timeout", "10", self._container, check=False)
+
     def stop(self) -> None:
         """Remove the guard and its network, leaving the records in place."""
         if self._container:
+            # Drained first in case no one called drain(): a forced removal
+            # before the handler runs loses the final account.
+            self.drain()
             self._run("rm", "--force", self._container, check=False)
             self._container = None
         if self._network:

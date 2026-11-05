@@ -291,6 +291,18 @@ class VerifyResult:
     #: asking why a bundle is weaker than expected is always asking about one
     #: of these, which is why they are not collapsed into a boolean.
     controls: dict = field(default_factory=dict)
+    @property
+    def chain_intact(self) -> bool:
+        """What :attr:`ok` actually means, under a name that says so.
+
+        ``ok`` predates the three-claim split and was documented as "nothing is
+        wrong". It is now exactly "the chain verifies", and two call sites
+        believed the docstring: ``wl-enclave ps`` printed ``ok`` for every
+        uncontained bundle, and ``evidence export`` let one through without
+        ``--force``. Call sites should branch on :attr:`verdict`.
+        """
+        return self.ok
+
     #: Digest of the files that decided what this run was allowed to do. Two
     #: bundles with different values here were governed by different rules,
     #: whatever their summaries say — which matters because the workspace is
@@ -343,6 +355,67 @@ class VerifyResult:
                 f"{'s' if count != 1 else ''})"
             )
         return f"OK — {self.records} records, chain intact, {note}"
+
+
+#: A run ends with exactly one of these, and which one changes the reading:
+#: ``run.close`` completed, ``run.contained`` was stopped by an operator, and
+#: ``run.error`` failed before it was under way. A chain with none of them is
+#: missing its end, which is indistinguishable from having been truncated.
+_TERMINAL_RECORDS = frozenset({"run.close", "run.contained", "run.error"})
+
+#: ``run.close`` field -> the record type it counts. Only fields that count
+#: chain records one-for-one appear here; a derived total (``egress_allowed``,
+#: say, which splits one type by verdict) is reconciled separately or not at
+#: all, because a mismatch there would not mean what this check means.
+_CLOSE_TALLIES = {
+    "decisions": "decision",
+    "egress_attempts": "egress.attempt",
+    "egress_malformed": "egress.malformed",
+    "egress_tunnels": "egress.tunnel",
+    "egress_tunnel_progress_notes": "egress.tunnel_progress",
+    "egress_saturated_notes": "egress.saturated",
+    "egress_records_suppressed": "egress.records_suppressed",
+}
+
+
+def _expects_egress(records: list[Record]) -> bool:
+    """Whether a guard was started, and therefore owes an attestation."""
+    return any(r.type == "egress.guard_started" for r in records)
+
+
+def _reconcile_close(records: list[Record]) -> list[str]:
+    """Where ``run.close``'s own tallies disagree with the chain holding them.
+
+    The bundle counts what it ingested and then stores those counts next to
+    the records themselves, which is the one internal cross-check the format
+    has. Ignoring it wasted it: records lost between ingest and seal — a
+    truncated guard file, a second ingest path, an edit before sealing — leave
+    a chain that is perfectly consistent and quietly short.
+
+    A disagreement is an integrity problem rather than an incompleteness one.
+    The bundle is not reporting a gap it knows about; it is making two
+    statements that cannot both be true.
+    """
+    closes = [r for r in records if r.type == "run.close"]
+    if not closes:
+        return []
+    data = closes[0].data
+    actual: dict[str, int] = {}
+    for record in records:
+        actual[record.type] = actual.get(record.type, 0) + 1
+
+    problems = []
+    for field, kind in sorted(_CLOSE_TALLIES.items()):
+        claimed = data.get(field)
+        if not isinstance(claimed, int):
+            continue
+        held = actual.get(kind, 0)
+        if claimed != held:
+            problems.append(
+                f"{CHAIN_FILE}: run.close says {field}={claimed}, but the "
+                f"chain holds {held} {kind} record(s)"
+            )
+    return problems
 
 
 def verify(bundle_dir: Path) -> VerifyResult:
@@ -505,11 +578,25 @@ def verify(bundle_dir: Path) -> VerifyResult:
             )
 
 
+    write_errors = 0
+    for note in suppressions:
+        value = note.data.get("write_errors")
+        if isinstance(value, int) and value > write_errors:
+            write_errors = value
     if suppressions:
         dropped = f"{records_dropped} " if records_dropped else ""
         incomplete_reasons.append(
             f"the guard reports {dropped}record(s) it could not write, so the "
             f"egress records are a lower bound"
+        )
+    if write_errors:
+        # Distinct from a budget drop, and worse: the budget is a limit we
+        # chose, while this is the evidence file refusing writes. Named
+        # separately so a reviewer is not told the guard was merely busy.
+        incomplete_reasons.append(
+            f"{write_errors} record(s) could not be written to the guard's "
+            f"evidence file at all; connections they described were refused, "
+            f"but the file is short by that many"
         )
     for name in attestation.unverified_controls(controls):
         detail = (controls[name].get("detail") or "").strip()
@@ -524,6 +611,67 @@ def verify(bundle_dir: Path) -> VerifyResult:
             f"after that are absent rather than denied"
         )
 
+    # -- what the bundle does NOT say ------------------------------------
+    #
+    # Everything above reads a record that volunteered something. On its own
+    # that makes absence indistinguishable from compliance, which is the exact
+    # inversion of what this format is for: the shortest, emptiest bundle would
+    # be the cleanest. So the checks below ask whether the records that must
+    # exist do exist, rather than waiting to be told.
+
+    # A run ends exactly once, and says so. Without this a bundle holding only
+    # run.open verifies as OK, and a run that died before it had a sandbox
+    # produces a shorter, cleaner bundle than one that completed.
+    terminals = [r for r in records if r.type in _TERMINAL_RECORDS]
+    if not terminals:
+        problems.append(
+            f"{CHAIN_FILE}: no {' / '.join(sorted(_TERMINAL_RECORDS))} record; "
+            f"the chain does not say how the run ended, so records may be "
+            f"missing from the end"
+        )
+    elif len(terminals) > 1:
+        problems.append(
+            f"{CHAIN_FILE}: {len(terminals)} terminal records, but a run ends "
+            f"once: " + ", ".join(f"{r.type}@{r.seq}" for r in terminals)
+        )
+    elif terminals[0].type == "run.error":
+        # Sealed deliberately, so not an integrity failure — but a run that
+        # failed before it was under way never attested anything, and the
+        # absence of those records is not evidence of a clean run.
+        incomplete_reasons.append(
+            f"the run ended in error before completing "
+            f"({terminals[0].data.get('message') or 'no message'}); whatever "
+            f"had not happened yet is absent rather than clean"
+        )
+
+    # The field the guard protocol calls the finding that matters. It reached
+    # the printed output and not the verdict, so a guard that reported a
+    # non-exclusive route — or no attestation at all — still verified as OK.
+    if egress_attested is False:
+        problems.append(
+            f"{CHAIN_FILE}: the guard did not attest as the sandbox's only "
+            f"route, so the egress records are a lower bound rather than an "
+            f"account of what the sandbox tried"
+        )
+    elif egress_attested is None and _expects_egress(records):
+        incomplete_reasons.append(
+            "a guard was started but never attested, so nothing establishes "
+            "it was the sandbox's only route"
+        )
+
+    # The chain carries the numbers needed to detect records lost before the
+    # seal, and ignoring them wasted the one cross-check the format has.
+    problems.extend(_reconcile_close(records))
+
+    # A control name outside the shared vocabulary means a writer and this
+    # verifier have drifted, which is the failure the closed set exists to
+    # prevent. Reported rather than sorted into a claim by guesswork.
+    for name in attestation.unrecognised_controls(controls):
+        incomplete_reasons.append(
+            f"control {name!r} is not one this verifier recognises, so its "
+            f"bearing on containment cannot be judged"
+        )
+
     return VerifyResult(
         ok=not problems,
         records=len(records),
@@ -536,6 +684,8 @@ def verify(bundle_dir: Path) -> VerifyResult:
         records_dropped=records_dropped,
         incomplete_reasons=incomplete_reasons,
         controls=controls,
-        contained=not attestation.failed_controls(controls),
+        contained=not attestation.failed_controls(
+            controls, attestation.CONTAINMENT
+        ),
         governed_by=governed_by,
     )

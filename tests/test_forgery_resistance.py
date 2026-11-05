@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from types import SimpleNamespace
 import uuid
 from pathlib import Path
 
@@ -91,9 +92,18 @@ def test_an_unrecognised_record_is_kept_rather_than_dropped():
 # -- verify resists an appended attestation --------------------------------
 
 def _bundle(tmp_path, records):
+    """Seal a bundle from ``records``, ending it the way a real run does.
+
+    A terminal record is appended unless the test supplies one, so each test's
+    record list stays about the thing it is testing. verify() now requires a
+    chain to say how its run ended — without that, a bundle holding only
+    run.open verified as OK, which made the emptiest bundle the cleanest.
+    """
     w = evidence.ChainWriter(tmp_path)
     for type_, data in records:
         w.append(type_, data)
+    if not any(t in evidence._TERMINAL_RECORDS for t, _ in records):
+        w.append("run.close", {"exit_status": 0})
     w.seal({"run": "t", "agent": "a", "runtime": "docker"})
     return tmp_path
 
@@ -615,3 +625,114 @@ def test_the_allowlist_travels_with_the_intent():
     assert e.allow == ("a.test:443", "b.test:443"), "sorted, so it is comparable"
     assert Egress.none().mediated is False
     assert Egress.none().network == "none"
+
+
+# -- the mask claim must rest on a read that happened ----------------------
+
+def test_an_unobservable_sandbox_cannot_attest_its_mask(monkeypatch):
+    """The regression that mattered most in the third review.
+
+    Every `docker exec` failing — a container that already exited, an image
+    with no `cat`, exec refused — was read as "the canary was unreadable,
+    therefore the mask holds". Combined with a mount table that could not be
+    read either, the control returned in_force=True with the strongest
+    provenance label in the vocabulary, from zero observation, and verify
+    prints no detail for a control that is True.
+    """
+    from wl_enclave.drivers import Sandbox
+    from wl_enclave.drivers.docker import DockerDriver
+
+    driver = DockerDriver()
+    sandbox = Sandbox(id="deadbeef", name="probe", driver="docker")
+    driver._masks["deadbeef"] = ["/work/runs"]
+    driver._canaries["deadbeef"] = {"/work/runs/.c": Path("/nonexistent/.c")}
+    driver._witness["deadbeef"] = ("/work/.w", Path("/nonexistent/.w"))
+
+    # Every probe fails the way exec does when it cannot run at all.
+    monkeypatch.setattr(
+        DockerDriver, "_run",
+        lambda self, *a, **k: SimpleNamespace(returncode=126, stdout="", stderr="exec failed"),
+    )
+    control = driver._mask_control(sandbox, ["/work/runs"], [])
+
+    assert control["in_force"] is None, control
+    assert "could not be observed" in control["detail"]
+
+
+def test_a_canary_hidden_but_exec_broken_is_not_a_confirmation(monkeypatch):
+    """Exit codes, not truthiness.
+
+    `cat` exits 1 for a file it cannot find — the mask working — and 126/127
+    when exec itself failed, which says nothing about the file.
+    """
+    from wl_enclave.drivers import Sandbox
+    from wl_enclave.drivers.docker import DockerDriver
+
+    driver = DockerDriver()
+    sandbox = Sandbox(id="c2", name="probe", driver="docker")
+    driver._masks["c2"] = ["/work/runs"]
+    driver._canaries["c2"] = {"/work/runs/.c": Path("/nonexistent/.c")}
+    driver._witness["c2"] = ("/work/.w", Path("/nonexistent/.w"))
+
+    def fake_run(self, *args, **kwargs):
+        # The witness reads fine, so the sandbox IS observable; the canary
+        # probe fails for an unrelated reason.
+        if "/work/.w" in args:
+            return SimpleNamespace(returncode=0, stdout="readable\n", stderr="")
+        return SimpleNamespace(returncode=127, stdout="", stderr="cat: not found")
+
+    monkeypatch.setattr(DockerDriver, "_run", fake_run)
+    control = driver._mask_control(sandbox, ["/work/runs"], [])
+
+    assert control["in_force"] is None, control
+    assert "unrelated to the mask" in control["detail"]
+
+
+# -- the sandbox owns evidence/ contents, so the host must not follow links -
+
+def test_a_symlinked_audit_file_is_refused_not_followed(tmp_path):
+    """Reproduces the third review's finding C.
+
+    The sandbox owns the contents of evidence/, so it can replace the audit
+    file with a symlink and have the trusted host read whatever it points at —
+    a sibling bundle/chain.jsonl, which the sandbox is never supposed to reach.
+    Bounded and field-filtered, so never a forgery primitive, but it made the
+    documented boundary weaker for reads than runs.py claims it is.
+    """
+    from wl_enclave import runs
+
+    secret = tmp_path / "chain.jsonl"
+    secret.write_text(
+        '{"decision": "Allow", "intent": "x", "resource": "y", "ts": "t"}\n'
+    )
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    audit = evidence_dir / "audit.jsonl"
+    audit.symlink_to(secret)
+
+    records, account = runs.read_decisions(audit)
+    assert records == [], "a symlinked audit file must not be read through"
+    assert account["rejected_not_a_regular_file"] == 1
+
+
+def test_a_real_audit_file_still_reads(tmp_path):
+    """The check must not cost the capability it protects."""
+    from wl_enclave import runs
+
+    audit = tmp_path / "audit.jsonl"
+    audit.write_text(
+        '{"decision": "Deny", "intent": "wire", "resource": "bank", "ts": "t"}\n'
+    )
+    records, account = runs.read_decisions(audit)
+    assert len(records) == 1
+    assert records[0]["asserted_by"] == "sandbox"
+    assert account["rejected_not_a_regular_file"] == 0
+
+
+def test_a_missing_audit_file_is_not_an_error(tmp_path):
+    """An agent that made no governed calls writes nothing."""
+    from wl_enclave import runs
+
+    records, account = runs.read_decisions(tmp_path / "nope.jsonl")
+    assert records == []
+    assert account["rejected_not_a_regular_file"] == 0

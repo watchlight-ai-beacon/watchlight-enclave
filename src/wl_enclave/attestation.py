@@ -56,6 +56,11 @@ __all__ = [
     "merge",
     "unverified_controls",
     "failed_controls",
+    "unrecognised_controls",
+    "claim_of",
+    "establishes",
+    "CONTAINMENT",
+    "WITNESSING",
 ]
 
 # -- how a control's state was established --------------------------------
@@ -109,8 +114,71 @@ def control(
     return entry
 
 
+# -- which claim a control's failure belongs to ---------------------------
+
+#: A failure here means the sandbox was less isolated than intended.
+CONTAINMENT = "containment"
+
+#: A failure here means the run was less *observed* than intended. Distinct
+#: from containment because the two move independently and sometimes in
+#: opposite directions: a guard that dies on an internal network leaves the
+#: sandbox able to reach nothing at all, so the run is strictly more contained
+#: and strictly less witnessed. Reporting that as a containment failure sends
+#: an operator to look for an escaped agent when the truth is that the witness
+#: died, and it spends the one alarm that should mean "isolation failed".
+WITNESSING = "witnessing"
+
+_CLAIM = {
+    NETWORK_UNROUTABLE: CONTAINMENT,
+    SANDBOX_SINGLE_NETWORK: CONTAINMENT,
+    SANDBOX_ON_INTENDED_NETWORK: CONTAINMENT,
+    ROOTFS_READ_ONLY: CONTAINMENT,
+    CAPABILITIES_DROPPED: CONTAINMENT,
+    NO_NEW_PRIVILEGES: CONTAINMENT,
+    EVIDENCE_MASKED: CONTAINMENT,
+    GUARD_ATTACHED: WITNESSING,
+    GUARD_HAS_EGRESS: WITNESSING,
+    GUARD_LIVE: WITNESSING,
+}
+
+
+def claim_of(name: str) -> Optional[str]:
+    """Which claim a control bears on, or ``None`` if this build has no idea.
+
+    An unrecognised name is not silently sorted into one bucket. A verifier
+    that guesses would either raise a containment alarm for something it cannot
+    describe, or quietly discount a real one.
+    """
+    return _CLAIM.get(name)
+
+
+# -- how strongly a control's state was established -----------------------
+
 #: How strong each state is. Lower is weaker, and weaker wins a merge.
 _STRENGTH = {False: 0, None: 1, True: 2}
+
+#: How strong each provenance is, on its own axis. ``REQUESTED`` is the one
+#: that does not establish anything: the module's whole premise is that a
+#: setting applied and never confirmed is indistinguishable from one never
+#: applied, so a control resting on it has not been established whatever its
+#: ``in_force`` says.
+_PROVENANCE = {
+    READBACK: 3,
+    TOPOLOGY: 3,
+    RUNTIME_CONFIG: 2,
+    REQUESTED: 1,
+}
+
+
+def establishes(entry: dict) -> bool:
+    """Whether this entry's provenance is strong enough to establish anything.
+
+    False for ``requested_not_readback``, and false for a provenance string
+    this build does not recognise — an unknown label cannot be assumed to be
+    one of the strong ones, and a driver inventing its own must not be able to
+    buy a stronger reading than the vocabulary grants.
+    """
+    return _PROVENANCE.get(entry.get("verified_by"), 0) >= 2
 
 
 def merge(into: dict, new: dict) -> dict:
@@ -128,14 +196,22 @@ def merge(into: dict, new: dict) -> dict:
     was genuinely in force when the topology was read and genuinely false by
     the end; the second fact is the one that bears on the evidence.
     """
+    def rank(entry: dict) -> tuple[int, int]:
+        # Both axes, weakest first. Ranking on in_force alone let the first
+        # record's provenance win whenever two layers agreed on the state —
+        # so a control read back out of the runtime could be replaced by one
+        # merely asked for, with no visible change.
+        return (
+            _STRENGTH.get(entry.get("in_force"), 1),
+            _PROVENANCE.get(entry.get("verified_by"), 0),
+        )
+
     merged = dict(into)
     for name, entry in (new or {}).items():
         if not isinstance(entry, dict):
             continue
         held = merged.get(name)
-        if held is None or _STRENGTH.get(entry.get("in_force"), 1) < _STRENGTH.get(
-            held.get("in_force"), 1
-        ):
+        if held is None or rank(entry) < rank(held):
             merged[name] = entry
     return merged
 
@@ -149,14 +225,36 @@ def unverified_controls(controls: dict) -> list[str]:
     return sorted(
         name
         for name, entry in (controls or {}).items()
-        if isinstance(entry, dict) and entry.get("in_force") is None
+        if isinstance(entry, dict)
+        and (entry.get("in_force") is None or not establishes(entry))
     )
 
 
-def failed_controls(controls: dict) -> list[str]:
-    """Names of controls established as *not* in force."""
+def failed_controls(controls: dict, claim: Optional[str] = None) -> list[str]:
+    """Names of controls established as *not* in force.
+
+    ``claim`` narrows the result to one kind of failure. Callers want this
+    split because the two kinds reach different verdicts — see
+    :data:`CONTAINMENT` and :data:`WITNESSING`.
+    """
     return sorted(
         name
         for name, entry in (controls or {}).items()
-        if isinstance(entry, dict) and entry.get("in_force") is False
+        if isinstance(entry, dict)
+        and entry.get("in_force") is False
+        and (claim is None or claim_of(name) == claim)
+    )
+
+
+def unrecognised_controls(controls: dict) -> list[str]:
+    """Names this build cannot place in either claim.
+
+    Reported rather than bucketed. The constants exist so that one verifier
+    reads what several layers write; a name outside the set means the two have
+    drifted, and a verifier that guessed would hide exactly that.
+    """
+    return sorted(
+        name
+        for name in (controls or {})
+        if claim_of(name) is None
     )

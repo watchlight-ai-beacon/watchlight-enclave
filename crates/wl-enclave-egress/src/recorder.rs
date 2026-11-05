@@ -55,6 +55,9 @@ struct State {
     /// accounted for in a note already. Kept apart from the evidence counters
     /// so flooding one cannot exhaust the other.
     refused: u64,
+    /// Records that were within budget but did not reach the file. Counted so
+    /// that a file which becomes writable again can still state the gap.
+    write_errors: u64,
     refused_noted: u64,
     saturation_notes: u64,
     last_saturation: Option<Instant>,
@@ -77,6 +80,7 @@ impl Recorder {
                 suppression_noted: false,
                 refused: 0,
                 refused_noted: 0,
+                write_errors: 0,
                 saturation_notes: 0,
                 last_saturation: None,
             }),
@@ -227,7 +231,10 @@ impl Recorder {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if state.suppressed == 0 && state.refused == state.refused_noted {
+        if state.suppressed == 0
+            && state.refused == state.refused_noted
+            && state.write_errors == 0
+        {
             return;
         }
         let record = serde_json::json!({
@@ -237,6 +244,11 @@ impl Recorder {
             "records_dropped": state.suppressed,
             "refused_total": state.refused,
             "refused_unnoted": state.refused - state.refused_noted,
+            // A record lost to a failing file is as absent as one dropped
+            // under a budget, and the two have different causes worth telling
+            // apart: one means the guard was too busy, the other that its
+            // evidence file stopped accepting writes.
+            "write_errors": state.write_errors,
         });
         let _ = writeln!(state.file, "{record}");
         let _ = state.file.flush();
@@ -261,7 +273,6 @@ impl Recorder {
             if state.suppression_noted {
                 return false;
             }
-            state.suppression_noted = true;
             // Say so once, in the file itself. A reviewer must never mistake a
             // rate-limited file for a quiet run.
             let note = serde_json::json!({
@@ -274,16 +285,29 @@ impl Recorder {
                 },
                 "records_dropped": state.suppressed,
             });
-            let _ = writeln!(state.file, "{note}");
-            let _ = state.file.flush();
+            // Latched only if the note actually reached the file, so a failed
+            // note is retried rather than silently standing in for one.
+            if writeln!(state.file, "{note}").is_ok() && state.file.flush().is_ok() {
+                state.suppression_noted = true;
+            }
             return false;
         }
 
+        // The write is attempted before the counters move, and its result is
+        // the return value. Discarding it was fail-OPEN, and in the one
+        // direction this guard exists to prevent: the caller treats `true` as
+        // "recorded" and forwards the traffic, so a full or failing disk
+        // yielded a policy-allowed tunnel with no record of it, in a bundle
+        // that then verified as complete. Budget exhaustion was fail-closed
+        // and this was not, which made the guarantee read stronger than it
+        // was.
+        if writeln!(state.file, "{record}").is_err() || state.file.flush().is_err() {
+            state.write_errors += 1;
+            return false;
+        }
         state.suppression_noted = false;
         state.window_count += 1;
         state.written += 1;
-        let _ = writeln!(state.file, "{record}");
-        let _ = state.file.flush();
         true
     }
 }
@@ -504,6 +528,28 @@ mod tests {
         assert!(
             body.contains(r#""outcome":"open""#),
             "a progress record must not be mistakable for a closed tunnel's total"
+        );
+    }
+
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_record_that_does_not_reach_the_file_reports_failure() {
+        // The fail-open this closes. write() discarded the io::Result and
+        // returned true, so on a full or failing disk attempt() said
+        // "recorded" and the CONNECT handler forwarded the tunnel. A
+        // policy-allowed egress then crossed with no record of it, in a bundle
+        // that verified as complete — the exact outcome the guard exists to
+        // prevent, and the opposite of what the doc comment promised.
+        //
+        // /dev/full accepts opens and fails every write with ENOSPC, which is
+        // the cheapest honest stand-in for the real condition.
+        let rec = Recorder::create(Path::new("/dev/full")).expect("open /dev/full");
+
+        assert!(
+            !rec.attempt("example.com", 443, true, "allowlisted", "connect", None),
+            "an attempt whose record could not be written must report failure, \
+             so the caller refuses the connection instead of forwarding it"
         );
     }
 
