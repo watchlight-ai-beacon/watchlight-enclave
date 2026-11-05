@@ -131,7 +131,8 @@ async fn main() -> std::process::ExitCode {
     };
 
     eprintln!(
-        "wl-enclave-egress: listening on {listen}, {} allowlist rule(s), recording to {record_path}",
+        "wl-enclave-egress {}: listening on {listen}, {} allowlist rule(s), recording to {record_path}",
+        env!("CARGO_PKG_VERSION"),
         allowlist.len()
     );
     if allowlist.is_empty() {

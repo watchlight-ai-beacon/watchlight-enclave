@@ -193,6 +193,17 @@ class EgressGuard(Protocol):
         """Problems that would stop a run; empty means ready. Never raises."""
         ...
 
+    def build(self) -> dict:
+        """Which guard build is about to write records, read back from the runtime.
+
+        Part of the protocol rather than a Docker detail, because the guard is
+        the witness whose records the agent cannot influence. "Which build
+        produced this evidence" is a question a reviewer is entitled to ask of
+        any guard, and an implementation that cannot answer should return an
+        empty dict rather than a plausible-looking guess.
+        """
+        ...
+
     def state(self) -> dict:
         """What the runtime says the guard is doing *now*, read back from it.
 

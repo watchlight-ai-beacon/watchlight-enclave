@@ -49,6 +49,7 @@ in :mod:`wl_enclave.egress` and the mechanism does not.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -69,6 +70,22 @@ BLOCKED_NOT_RECORDED = ["raw_tcp", "udp", "icmp"]
 #: socket exists, given the runtime image ships no network tools. A test
 #: asserts the two stay in step.
 GUARD_READY_MARKER = "listening on"
+
+#: Pulls the version out of the readiness line the guard already prints, so
+#: the guard needs no second interface to be asked what it is. Self-reported,
+#: and recorded as such — see :meth:`LocalDockerGuard.build`.
+_ANNOUNCED = re.compile(r"wl-enclave-egress (\S+): " + GUARD_READY_MARKER)
+
+
+def _announced_version(log: str) -> str:
+    """The version the guard announced, or ``""`` if it announced none.
+
+    Empty rather than a placeholder: an older guard that prints no version is
+    a fact worth seeing in a bundle, and a stand-in string would be
+    indistinguishable from one that reported itself as that string.
+    """
+    found = _ANNOUNCED.search(log or "")
+    return found.group(1) if found else ""
 
 #: How long to wait for the guard to start accepting before giving up.
 GUARD_START_TIMEOUT = 15.0
@@ -100,6 +117,8 @@ class LocalEgressGuard:
         self._crate = crate_dir or Path(__file__).resolve().parents[3] / "crates" / "wl-enclave-egress"
         self._network: Optional[str] = None
         self._container: Optional[str] = None
+        #: What the guard said about itself on startup. Empty until it does.
+        self._announced = ""
 
     # -- plumbing ---------------------------------------------------------
     def _run(self, *args: str, timeout: int = _CALL_TIMEOUT, check: bool = True):
@@ -268,6 +287,7 @@ class LocalEgressGuard:
                 # not ship, or a throwaway container on the internal network.
                 last = self.logs()
                 if GUARD_READY_MARKER in last:
+                    self._announced = _announced_version(last)
                     return
             time.sleep(0.1)
         tail = (last or "").strip().splitlines()
@@ -275,6 +295,41 @@ class LocalEgressGuard:
             f"the guard did not report a bound listener within {GUARD_START_TIMEOUT}s"
             + (f": {tail[-1]}" if tail else "")
         )
+
+    def build(self) -> dict:
+        """Which guard build wrote the records, read back out of the runtime.
+
+        The bundle recorded the guard's *name* and nothing about which binary
+        that name resolved to. Since the guard is the witness whose records the
+        agent cannot influence — and the intended second signer — "which build
+        produced this evidence" is a question a reviewer is entitled to ask, and
+        a version number nobody can trace back from a bundle is decorative.
+
+        Two different identifiers, deliberately:
+
+        ``image`` is the digest the daemon holds for the image it ran. It
+        identifies the artefact exactly and is not self-reported, so a guard
+        cannot lie about it.
+
+        ``version`` is what the binary announced about itself on startup. It is
+        self-reported and therefore weaker, but it is the only one that
+        survives if the image is rebuilt under the same tag — which is exactly
+        what happens on a developer machine.
+        """
+        facts: dict = {}
+        if self._announced:
+            facts["version"] = self._announced
+        probe = self._run(
+            "image", "inspect", GUARD_IMAGE, "--format", "{{.Id}}",
+            check=False, timeout=30,
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            facts["image"] = probe.stdout.strip()
+        else:
+            # Absent rather than guessed. An image we cannot identify is not
+            # the same as one we identified as missing.
+            facts["image_unreadable"] = True
+        return facts
 
     def state(self) -> dict:
         """What the runtime says the guard container is doing right now.

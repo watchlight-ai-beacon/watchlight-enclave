@@ -267,6 +267,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "egress.guard_started",
                 {
                     "guard": guard.name,
+                    # Which build, not just which guard. The name resolves to a
+                    # binary, and a bundle that cannot say which one leaves a
+                    # reviewer unable to tell whether a known guard bug was in
+                    # the code that produced these records.
+                    **guard.build(),
                     "endpoint": f"{endpoint.host}:{endpoint.port}",
                     "network": sandbox_network,
                     "allow": list(cfg.egress_allow),

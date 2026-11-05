@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "wl-enclave-egress"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde_json",
  "tokio",

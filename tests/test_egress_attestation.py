@@ -13,6 +13,8 @@ import subprocess
 import uuid
 from pathlib import Path
 
+from types import SimpleNamespace
+
 import pytest
 
 from wl_enclave.egress import Allowlist, GuardError
@@ -148,3 +150,46 @@ def test_a_guard_that_exits_immediately_fails_the_start(tmp_path):
         local_mod.GUARD_IMAGE = original
         g.stop()
         rec.unlink(missing_ok=True)
+
+
+# -- which build wrote the records ----------------------------------------
+
+def test_the_announced_version_is_parsed_from_the_readiness_line():
+    """Reuses the line the host already waits for, so the guard needs no
+    second interface to be asked what it is."""
+    from wl_enclave.egress.local import _announced_version
+
+    ready = (
+        "wl-enclave-egress 0.1.0: listening on 0.0.0.0:8080, "
+        "1 allowlist rule(s), recording to /evidence/egress.jsonl"
+    )
+    assert _announced_version(ready) == "0.1.0"
+
+
+def test_a_guard_that_announces_no_version_reports_none():
+    """Empty, not a placeholder.
+
+    An older guard printing no version is a fact worth seeing in a bundle, and
+    a stand-in string would be indistinguishable from a guard that genuinely
+    reported itself as that string.
+    """
+    from wl_enclave.egress.local import _announced_version
+
+    assert _announced_version("wl-enclave-egress: listening on 0.0.0.0:8080") == ""
+    assert _announced_version("") == ""
+
+
+def test_an_unidentifiable_image_is_recorded_as_unreadable(monkeypatch):
+    """Absent rather than guessed — an image we cannot identify is not the
+    same as one we identified as missing."""
+    from wl_enclave.egress.local import LocalEgressGuard
+
+    guard = LocalEgressGuard()
+    monkeypatch.setattr(
+        LocalEgressGuard, "_run",
+        lambda self, *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="no such image"),
+    )
+    facts = guard.build()
+
+    assert facts["image_unreadable"] is True
+    assert "image" not in facts
