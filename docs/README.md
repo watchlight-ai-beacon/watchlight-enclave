@@ -16,19 +16,24 @@ You need a container runtime. Docker is the default because you probably
 already have it — Docker Desktop, Colima and Podman all work.
 
 ```bash
-curl -fsSL https://get.watchlight.ai/wl-enclave | sh
+pip install watchlight-enclave
 ```
 
-> **Not published yet.** Until the first release, install from a clone:
->
-> ```bash
-> git clone git@github.com:watchlight-ai-beacon/watchlight-enclave.git
-> cd watchlight-enclave
-> uv venv && uv pip install -e .
-> ```
->
-> That puts `wl-enclave` in `.venv/bin`. Either activate the venv or call it by
-> path.
+That gives you the `wl-enclave` command. Python 3.10 or newer.
+
+To work on Enclave itself, install from a clone instead, which also gets you
+the tests — and the tests are worth running, because they are how you check
+that `verify` refuses what it claims to refuse:
+
+```bash
+git clone https://github.com/watchlight-ai-beacon/watchlight-enclave.git
+cd watchlight-enclave
+uv venv && uv pip install -e ".[dev]"
+pytest
+```
+
+That puts `wl-enclave` in `.venv/bin`. Either activate the venv or call it by
+path.
 
 ## 1. Make a workspace
 
