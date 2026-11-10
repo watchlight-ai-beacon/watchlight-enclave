@@ -43,7 +43,7 @@ dependencies = ["PyYAML>=6.0", "cryptography>=42.0"]
 [project.urls]
 Homepage = "https://github.com/watchlight-ai-beacon/watchlight-enclave"
 Source = "https://github.com/watchlight-ai-beacon/watchlight-enclave"
-Documentation = "https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/docs/README.md"
+Documentation = "https://docs.watchlight.ai/enclave"
 Changelog = "https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/CHANGELOG.md"
 Issues = "https://github.com/watchlight-ai-beacon/watchlight-enclave/issues"
 "Security policy" = "https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/SECURITY.md"
