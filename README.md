@@ -41,6 +41,12 @@ wl-enclave verify runs/<id>/bundle       # checks the evidence, offline
 wl-enclave hosts --since 2026-11-03      # what did it actually reach?
 ```
 
+`keygen` writes one Ed25519 key to `~/.config/wl-enclave/signing.key`, mode
+0600, and prints a public key id. The private key stays in that file. It never
+goes into a bundle, into the sandbox, or over the network. Hand reviewers the
+public key id, never the file, so they can pin the signer:
+`wl-enclave verify <bundle> --signer <id>`.
+
 > **Status: pre-1.0.** The CLI, the `enclave.yaml` schema and the strictness of
 > `verify` may each change in a minor release, and
 > [`CHANGELOG.md`](CHANGELOG.md) is explicit about which of the three a release
