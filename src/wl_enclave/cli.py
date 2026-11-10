@@ -414,6 +414,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 for problem in egress_attestation["problems"]:
                     print(f"                 - {problem}")
 
+        # Only now does any of the agent's code run. Everything above this
+        # line describes a sandbox that was holding, which is what makes the
+        # description worth having: the mask that stops the agent reaching its
+        # own evidence was read back and recorded before the agent existed to
+        # test it. The chain is hash-linked in order, so a reviewer can see
+        # that sandbox.attested precedes every record the agent authored.
+        driver.release(sandbox)
+
         status = driver.wait(sandbox, cfg.limits.timeout_seconds)
         timed_out = status is None
         if timed_out:

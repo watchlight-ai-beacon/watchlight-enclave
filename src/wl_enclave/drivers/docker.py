@@ -39,6 +39,14 @@ from . import DriverError, Egress, Sandbox, SandboxSpec, nonroot_user
 #: Ceiling on any single docker invocation that is not expected to block.
 _CALL_TIMEOUT = 60
 
+#: What the sandbox runs instead of the agent, so that it is alive and its
+#: mounts are established while attest() reads the boundary back, and the agent
+#: starts only once that has been recorded. `sleep` is in every base image this
+#: project has seen, including the python:*-slim family the examples use; an
+#: image without it fails loudly in provision() rather than silently skipping
+#: the hold.
+_HOLD_COMMAND = ("sleep", "infinity")
+
 
 class DockerDriver:
     """Provisions sandboxes with the Docker (or Podman) CLI."""
@@ -56,6 +64,14 @@ class DockerDriver:
         #: check the sandbox against what was asked for rather than against
         #: whatever it finds attached.
         self._egress: dict[str, Egress] = {}
+        #: The agent command and working directory held back from provision(),
+        #: to be run by release() once the boundary has been attested.
+        self._command: dict[str, tuple[list[str], str]] = {}
+        #: The released agent process, one per sandbox. This is the process
+        #: whose exit status is the run's, not the container's.
+        self._agent: dict[str, subprocess.Popen] = {}
+        #: Its output, kept because it can only be read from the pipe once.
+        self._agent_output: dict[str, str] = {}
         self.name = binary
         self._bin = binary
 
@@ -190,12 +206,20 @@ class DockerDriver:
 
         for key, value in sorted(spec.env.items()):
             args += ["--env", f"{key}={value}"]
-        args += [spec.image, *spec.command]
+        # The hold, not spec.command. The agent is started by release(), after
+        # attest() has read the boundary back out of the running container.
+        args += [spec.image, *_HOLD_COMMAND]
 
         proc = self._run(*args)
         container_id = proc.stdout.strip()
         if not container_id:
             raise DriverError(f"{self._bin} run returned no container id")
+        # Before anything is planted or attested. If the hold is not running
+        # there is nothing to attest, and every probe below would fail for a
+        # reason that has nothing to do with the boundary — which is the
+        # confusion this whole change exists to remove.
+        self._require_running(container_id)
+        self._command[container_id] = (list(spec.command), spec.workdir)
         # Retained so attest() can assert its own postcondition: that every
         # mask this driver applied came back. Without it the attestation can
         # only report what tmpfs mounts exist, which is not the same question.
@@ -204,6 +228,27 @@ class DockerDriver:
         self._witness[container_id] = self._plant_witness(spec)
         self._egress[container_id] = spec.egress
         return Sandbox(id=container_id, name=spec.name, driver=self.name)
+
+    def _require_running(self, container_id: str) -> None:
+        """Raise unless the container is up, saying why it is not.
+
+        An image that cannot run the hold exits instantly, and the failure then
+        surfaces as four unreadable probes and an INCOMPLETE verdict, which
+        reads like a broken boundary rather than a missing binary.
+        """
+        state = self._run(
+            "inspect", "--format", "{{.State.Running}}", container_id, check=False
+        )
+        if state.stdout.strip() == "true":
+            return
+        told = self._run("logs", container_id, check=False)
+        said = ((told.stdout or "") + (told.stderr or "")).strip().splitlines()
+        raise DriverError(
+            f"the sandbox exited before it could be attested: "
+            f"{' '.join(_HOLD_COMMAND)} did not stay up"
+            + (f" ({said[-1]})" if said else "")
+            + f". The agent image must provide {_HOLD_COMMAND[0]!r}."
+        )
 
     def _plant_canaries(
         self, spec: SandboxSpec, masks: list[str]
@@ -586,22 +631,95 @@ class DockerDriver:
             "probe round",
         )
 
+    def release(self, sandbox: Sandbox) -> None:
+        """Run the agent in the attested sandbox.
+
+        ``exec`` rather than starting the container's own command, so the
+        boundary was read back before any of the agent's code ran. The exec
+        inherits the container's user, environment and the rest of the
+        boundary, so what was attested is what the agent gets; the working
+        directory is passed explicitly rather than inherited, because that is
+        the one part of the spec a bare exec does not carry over in every
+        runtime version.
+
+        Not waited on here. The process is kept so that wait() can follow the
+        agent instead of the container, which now outlives it.
+        """
+        held = self._command.get(sandbox.id)
+        if held is None:
+            raise DriverError(
+                "that sandbox was not provisioned by this driver instance, so "
+                "the agent command it was created for is unknown"
+            )
+        if sandbox.id in self._agent:
+            raise DriverError("the agent has already been released into this sandbox")
+        command, workdir = held
+        # Re-checked rather than assumed: provision() proved the hold was up,
+        # but attest() ran in between, and a sandbox that died during it must
+        # not look like an agent that exited.
+        self._require_running(sandbox.id)
+        try:
+            self._agent[sandbox.id] = subprocess.Popen(
+                [self._bin, "exec", "--workdir", workdir, sandbox.id, *command],
+                stdout=subprocess.PIPE,
+                # Interleaved into one stream, which is what logs() returned
+                # when the agent was the container's first process.
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise DriverError(f"{self._bin} is not installed") from exc
+
     def wait(self, sandbox: Sandbox, timeout_seconds: int) -> Optional[int]:
-        """Block until the sandbox exits; ``None`` if it outlived the timeout."""
+        """Block until the agent exits; ``None`` if it outlived the timeout.
+
+        The agent's status, not the container's. The container is holding and
+        will still be running when this returns.
+        """
+        proc = self._agent.get(sandbox.id)
+        if proc is None:
+            raise DriverError(
+                "the agent was never released into this sandbox; "
+                "release() must be called after attest()"
+            )
         try:
-            proc = self._run("wait", sandbox.id, timeout=timeout_seconds, check=False)
+            out, _ = proc.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
+            # Left running on purpose. The caller quarantines the sandbox,
+            # which ends the exec, and logs() then collects what it had written.
             return None
-        out = proc.stdout.strip()
-        try:
-            return int(out.splitlines()[-1])
-        except (ValueError, IndexError):
-            return None
+        self._agent_output[sandbox.id] = out or ""
+        return proc.returncode
 
     def logs(self, sandbox: Sandbox) -> str:
-        """Everything the sandbox wrote, stdout and stderr interleaved."""
-        proc = self._run("logs", sandbox.id, check=False)
-        return (proc.stdout or "") + (proc.stderr or "")
+        """Everything the agent wrote, stdout and stderr interleaved.
+
+        Read from the exec, because the agent is no longer the container's
+        first process. A pipe can only be drained once, so wait() stores what
+        it read and this returns that; after a timeout there is nothing stored
+        and the pipe is drained here instead.
+        """
+        captured = self._agent_output.get(sandbox.id)
+        if captured is None:
+            proc = self._agent.get(sandbox.id)
+            if proc is not None:
+                try:
+                    out, _ = proc.communicate(timeout=_CALL_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    out, _ = proc.communicate()
+                captured = out or ""
+                self._agent_output[sandbox.id] = captured
+        # The hold writes nothing, so anything here came from the runtime or
+        # from an image whose entrypoint ran despite it. Kept out of the
+        # agent's own output and labelled, rather than silently concatenated.
+        told = self._run("logs", sandbox.id, check=False)
+        aside = ((told.stdout or "") + (told.stderr or "")).strip()
+        if aside:
+            return (captured or "") + (
+                f"\n[from the sandbox itself, outside the agent process]\n{aside}\n"
+            )
+        return captured or ""
 
     def quarantine(self, sandbox: Sandbox) -> None:
         """SIGKILL the sandbox. No grace period, no cooperation required."""
@@ -610,6 +728,16 @@ class DockerDriver:
     def teardown(self, sandbox: Sandbox) -> None:
         """Remove the sandbox, whether or not it is still running."""
         self._run("rm", "--force", "--volumes", sandbox.id, check=False)
+        # Dropped after the container, so a failed rm still leaves the state
+        # that explains what the sandbox was.
+        self._command.pop(sandbox.id, None)
+        self._agent_output.pop(sandbox.id, None)
+        agent = self._agent.pop(sandbox.id, None)
+        if agent is not None and agent.poll() is None:
+            # The container is gone, so the exec cannot outlive it for long,
+            # but a zombie here would outlive the CLI process.
+            agent.kill()
+            agent.communicate()
 
     # -- beyond the protocol ---------------------------------------------
     def build_image(self, context: Path, dockerfile: Path, tag: str) -> str:

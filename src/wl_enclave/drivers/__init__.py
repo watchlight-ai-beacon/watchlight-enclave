@@ -284,7 +284,15 @@ class RuntimeDriver(Protocol):
         ...
 
     def provision(self, spec: SandboxSpec) -> Sandbox:
-        """Create and start the sandbox. Raises :class:`DriverError`."""
+        """Create and start the sandbox, **without starting the agent**.
+
+        The sandbox comes up holding: alive, with its mounts established, and
+        running nothing of the agent's. That is what makes attestation
+        meaningful, so a driver must not run ``spec.command`` here. Call
+        :meth:`release` once :meth:`attest` has confirmed the boundary.
+
+        Raises :class:`DriverError`.
+        """
         ...
 
     def attest(self, sandbox: Sandbox) -> dict:
@@ -295,12 +303,36 @@ class RuntimeDriver(Protocol):
         """
         ...
 
+    def release(self, sandbox: Sandbox) -> None:
+        """Start the agent in a sandbox that has already been attested.
+
+        The second half of :meth:`provision`, split from it so that no agent
+        code runs until the containment around it has been read back and
+        recorded. Two things went wrong when the agent started with the
+        sandbox. The attestation raced it, and on a fast host described a
+        container that had already exited. Worse, the checks that establish the
+        agent cannot reach its own evidence ran *after* the agent could have
+        reached it, which is the wrong order for a check to protect anything.
+
+        Raises :class:`DriverError` if called twice, or on a sandbox this
+        driver instance did not provision.
+        """
+        ...
+
     def wait(self, sandbox: Sandbox, timeout_seconds: int) -> Optional[int]:
-        """Block until exit, returning the status, or ``None`` on timeout."""
+        """Block until the **agent** exits, returning its status.
+
+        ``None`` on timeout. The status is the agent's own, not the sandbox's:
+        the sandbox outlives the agent it was holding for.
+        """
         ...
 
     def logs(self, sandbox: Sandbox) -> str:
-        """Everything the sandbox wrote to stdout and stderr."""
+        """Everything the **agent** wrote to stdout and stderr.
+
+        The agent is no longer the sandbox's first process, so this is the
+        output of the released command, not of the container.
+        """
         ...
 
     def quarantine(self, sandbox: Sandbox) -> None:

@@ -51,3 +51,27 @@ path = "src/wl_enclave/signing.py"
 fingerprint = "90c0e56411fb55e6838447e0e0c97070:0"
 issue = "#1"
 reason = "False positive from a file-oriented heuristic applied to a directory. The rule calls 0o700 'widely permissive' and recommends 0o644 as a good default; for the directory that holds the Ed25519 signing key, 0o644 would be strictly worse on both counts — world-readable, and not traversable by its owner, so the key could not be opened at all. 0o700 is owner-only and is the tightest mode that still works. The chmod is deliberate rather than redundant: mkdir's mode argument does nothing when the directory already exists, which is the case that leaves a pre-existing ~/.config/wl-enclave at the umask default of 0755. The key file itself is created at 0o600 via os.open before any bytes are written. Both modes are asserted by tests (test_a_new_key_is_not_readable_by_anyone_else, test_the_key_directory_is_not_readable_by_other_users). Full review in #1."
+
+[[finding]]
+tool = "opengrep"
+rule = "community.python.lang.security.audit.dangerous-subprocess-use-audit"
+path = "src/wl_enclave/drivers/docker.py"
+fingerprint = "9c44a81b9e3737228f7098b09030dd5a:0"
+issue = "#22"
+reason = "Audit-class rule: fires on any non-static subprocess argv and cannot see the mitigation. This is the Popen in release(), which execs the agent inside the already-attested sandbox; it exists because the agent must not be the container's first process, or the attestation would race it (#22). Same mitigations as the subprocess.run calls already in this file and reviewed in #1: the list form with shell=False, so there is no shell to inject into, and the binary constrained to docker/podman by get_driver(). Of the three non-literal elements, the container id is the daemon's own output and the working directory and command come from enclave.yaml, which config.load() validates; DockerDriver._reject_flaglike() refuses anything flag-like in the spec at provision time, which is what matters because docker exec parses flags up to the container id. The agent cannot influence any of them: they are all fixed before it runs, which is the ordering this change establishes. Full review in #1."
+
+[[finding]]
+tool = "opengrep"
+rule = "community.python.lang.security.audit.dangerous-subprocess-use-audit"
+path = "tests/test_attestation_precedes_the_agent.py"
+fingerprint = "83f845cb85ddd826b9e105fde4b8a465:0"
+issue = "#22"
+reason = "False positive on a result type. The rule matches subprocess.CompletedProcess, which starts no process: it is the object subprocess.run returns, constructed here by a fake standing in for the docker CLI so these tests can assert the provision/attest/release ordering without a container runtime. Importing the name directly instead of reaching through the module does not avoid the match, so it is recorded rather than worked around. Reviewed with #22."
+
+[[finding]]
+tool = "opengrep"
+rule = "community.python.lang.security.audit.dangerous-subprocess-use-audit"
+path = "tests/test_attestation_precedes_the_agent.py"
+fingerprint = "54eca3e50a310a03b9cc3493887245d4:0"
+issue = "#22"
+reason = "False positive on an exception type. The rule matches subprocess.TimeoutExpired, which starts no process: it is raised by the fake agent process to drive the timeout path, where wait() must return None and leave the pipe undrained so the output survives the quarantine that follows. Recorded for the same reason as the CompletedProcess match above. Reviewed with #22."
