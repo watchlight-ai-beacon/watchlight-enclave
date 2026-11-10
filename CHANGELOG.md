@@ -36,9 +36,11 @@ Nothing yet.
 
 ## [0.2.1] — 2026-11-10
 
-**Packaging only.** No change to the CLI, to `enclave.yaml`, to how strictly
-`verify` reads a bundle, or to the bundle format. Nothing here can change the
-verdict on a bundle you already hold.
+**Packaging and documentation only.** No change to the CLI, to `enclave.yaml`,
+to how strictly `verify` reads a bundle, or to the bundle format. Nothing here
+can change the verdict on a bundle you already hold.
+
+This is also the release where the repository became public.
 
 This is the first release on PyPI: `pip install watchlight-enclave`. 0.2.0 was
 tagged before the publishing workflow existed, and a publish must come from a
@@ -69,6 +71,35 @@ a GitHub release and an install from source; nothing was published under it.
   and a reader deciding whether an upgrade breaks their CI gate relies on that
   being accurate; a second copy drifts. A missing or empty section for the
   tagged version fails the run rather than falling back to generated notes.
+
+### Documentation
+
+- **[`SECURITY.md`](SECURITY.md)** — private disclosure, mirroring the
+  [Developer Edition](https://github.com/watchlight-ai-beacon/watchlight-de)
+  policy: same routes, same response windows, same safe harbour. It adds one
+  section that policy does not need — *what we treat as most severe*. A bundle
+  that understates what happened while still verifying ranks above remote code
+  execution in the CLI here, so the policy says so outright, lists the four
+  shapes it takes, and names the two limits that are already documented
+  (key-holder re-seal, and traffic the topology blocks but the guard never
+  sees) so nobody spends a weekend rediscovering them.
+- **[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)** — the Developer Edition file
+  verbatim, Contributor Covenant 2.1, reports to conduct@watchlight.ai.
+- **A package page of its own.** `readme` points at `README-pypi.md`, 4.2 kB
+  rather than 18 kB. The repository README is for someone deciding whether to
+  trust the design; a package page's job is to get you installed and then send
+  you to the repository, which is where the documentation lives.
+- **`[project.urls]`** was absent, so the package page had no route back to the
+  source. For a project whose claim is that you can read the verifier
+  yourself, that is the one link that has to work.
+- `CONTRIBUTING.md` told you to open a public issue for a weakness in the
+  evidence model and said a security policy was coming. Both are now wrong. It
+  also documents that `main` requires an approving review, and that the
+  maintainer bypass does not extend to the status checks.
+- The README dropped a duplicated paragraph and a status line claiming no
+  releases existed, and gained a section pointing at Developer Edition for
+  anyone who arrived via a bundle and wants to know where the decisions in it
+  come from.
 
 ### Changed
 
