@@ -1,0 +1,230 @@
+# Publish `watchlight-enclave` to PyPI.
+#
+# Same method as `watchlight-beacon`'s `publish-watchlight-engine.yml`: PyPI
+# Trusted Publishing over OIDC, manual trigger, dry-run by default, GitHub
+# Environments scoping the publisher config. No long-lived API token exists
+# anywhere — the runner mints a short-lived token per publish.
+#
+# ─── TWO DELIBERATE DIFFERENCES FROM THE ENGINE'S WORKFLOW ───
+#
+#   1. WE PUBLISH AN sdist. The engine is wheels-only because `maturin sdist`
+#      vendors the full Rust source of a proprietary compiled engine, and an
+#      sdist would hand over the exact thing the wheel exists to protect. The
+#      opposite is true here: `watchlight-enclave` is Apache-2.0 and its whole
+#      claim is that `wl-enclave verify` can be read and re-implemented by
+#      someone who does not trust us. A source distribution serves that claim.
+#      Do not copy the engine's wheels-only gate into this file.
+#
+#   2. ONE JOB, not build + publish. The engine needs a platform matrix; this
+#      is pure Python and builds one universal wheel in seconds. Keeping it in
+#      one job means the artifacts we publish are byte-for-byte the ones the
+#      gates below inspected, with no upload/download round trip in between
+#      where a different file could take their place.
+#
+# ─── OPERATOR PREREQUISITES (one-time, before the first real publish) ───
+#   1. Reserve `watchlight-enclave` on TestPyPI and PyPI UNDER the
+#      `watchlight-ai` PyPI ORG, not a personal account. PyPI names are global
+#      with no per-org namespacing. Skip a placeholder upload and go straight
+#      to the pending trusted publisher in (2); the first publish then creates
+#      the org-owned project, token-free.
+#   2. Configure a PyPI **Trusted Publisher** (OIDC) for this workflow.
+#      ⚠️ Two namespaces: the PyPI org (`watchlight-ai`) is NOT the GitHub org
+#      (`watchlight-ai-beacon`). This form wants the GitHub ones:
+#        PyPI project name: watchlight-enclave   (owned by the watchlight-ai org)
+#        Owner (GitHub):    watchlight-ai-beacon
+#        Repository:        watchlight-enclave
+#        Workflow name:     publish-pypi.yml
+#        Environment:       pypi    (repeat on TestPyPI with environment: testpypi)
+#   3. Create the `pypi` and `testpypi` GitHub Environments, optionally with a
+#      required reviewer, so a publish is an explicit approved action.
+#
+# ─── HOW TO RUN ───
+#   Dry run from a branch, to TestPyPI:
+#     gh workflow run publish-pypi.yml
+#   Real publish, which must be from the release tag:
+#     gh workflow run publish-pypi.yml --ref v0.2.0 \
+#       -f repository=pypi -f dry_run=false
+#
+# ─── Action pinning ───
+#   Third-party actions are SHA-pinned to an immutable commit with the
+#   human-readable tag in a trailing comment. First-party `actions/*` follow
+#   this repository's existing convention in ci.yml and float on a major tag.
+
+name: Publish watchlight-enclave (PyPI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Target index"
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
+      dry_run:
+        description: "Build and validate, but SKIP the upload"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: "Build, validate${{ inputs.dry_run && ' (dry run)' || format(', publish to {0}', inputs.repository) }}"
+    runs-on: ubuntu-latest
+    # The environment scopes the OIDC trusted-publisher config and can require
+    # an approver. `pypi` publishes to PyPI, `testpypi` to TestPyPI.
+    environment: ${{ inputs.repository }}
+    permissions:
+      contents: read
+      id-token: write # OIDC — trusted publishing mints a short-lived token
+    steps:
+      # A real publish is immutable and a filename can never be reused, so the
+      # ref it came from has to be the thing the tag names. TestPyPI stays open
+      # to any ref because its whole use is rehearsing from a branch.
+      - name: A publish to PyPI must come from a release tag
+        if: ${{ inputs.repository == 'pypi' }}
+        env:
+          GH_REF: ${{ github.ref }}
+        run: |
+          case "$GH_REF" in
+            refs/tags/v*) echo "Release tag: $GH_REF" ;;
+            *) echo "::error::Publishing to PyPI requires a release tag: gh workflow run publish-pypi.yml --ref v<X.Y.Z> -f repository=pypi -f dry_run=false (got $GH_REF)"; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build the wheel and the sdist
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build twine
+          python -m build
+          ls -la dist
+
+      - name: twine check
+        run: python -m twine check --strict dist/*
+
+      # The version is asserted three ways rather than trusted once. A wheel
+      # whose version disagrees with the tag is the one mistake that cannot be
+      # taken back: PyPI filenames are permanent, so 0.2.0 published from a
+      # 0.1.0 tree can never be corrected in place.
+      - name: The built version must agree with the package and the tag
+        env:
+          GH_REF_NAME: ${{ github.ref_name }}
+          GH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          declared="$(python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          source_version="$(python -c 'import sys; sys.path.insert(0,"src"); import wl_enclave; print(wl_enclave.__version__)')"
+          echo "pyproject: $declared"
+          echo "__version__: $source_version"
+          if [ "$declared" != "$source_version" ]; then
+            echo "::error::pyproject.toml says $declared but wl_enclave.__version__ says $source_version"
+            exit 1
+          fi
+          # Exactly one wheel and one sdist, both naming that version.
+          test -f "dist/watchlight_enclave-${declared}-py3-none-any.whl" \
+            || { echo "::error::no dist/watchlight_enclave-${declared}-py3-none-any.whl"; ls dist; exit 1; }
+          test -f "dist/watchlight_enclave-${declared}.tar.gz" \
+            || { echo "::error::no dist/watchlight_enclave-${declared}.tar.gz"; ls dist; exit 1; }
+          case "$GH_REF" in
+            refs/tags/v*)
+              if [ "v${declared}" != "$GH_REF_NAME" ]; then
+                echo "::error::tag $GH_REF_NAME does not match version $declared"
+                exit 1
+              fi
+              echo "tag $GH_REF_NAME matches version $declared"
+              ;;
+            *) echo "::notice::not a tag ref; version/tag agreement not checked" ;;
+          esac
+
+      # The enclave-specific fail-closed gate, and the reason this file does
+      # not reuse the engine's. hatchling's sdist takes what is in the tree, and
+      # `wl-enclave keygen` writes Ed25519 private keys as .pem/.key files. A
+      # developer who ran `keygen --path ./k.key` and then cut a release would
+      # publish a signing key to an immutable index. Refuse rather than warn.
+      - name: Fail closed — no key or credential material in the distributions
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sys, tarfile, zipfile, pathlib, re
+
+          # Names that must never appear inside a distribution. `runs/` carries
+          # evidence bundles from real runs; `.env`/`.venv` carry local state.
+          BAD = re.compile(
+              r"(^|/)("
+              r".*\.pem|.*\.key|.*\.p12|.*\.pfx|id_[a-z0-9]+|"
+              r"\.env|\.envrc|\.netrc|"
+              r"runs|\.venv|\.shoalscan"
+              r")(/|$)"
+          )
+
+          problems = []
+          for path in sorted(pathlib.Path("dist").iterdir()):
+              if path.suffix == ".whl":
+                  names = zipfile.ZipFile(path).namelist()
+              elif path.name.endswith(".tar.gz"):
+                  with tarfile.open(path) as tf:
+                      names = tf.getnames()
+              else:
+                  problems.append(f"{path.name}: unexpected artifact type")
+                  continue
+              for name in names:
+                  if BAD.search(name):
+                      problems.append(f"{path.name}: contains {name}")
+              # The verifier is the thing third parties are promised; a wheel
+              # without it is not this package.
+              if path.suffix == ".whl":
+                  for required in ("wl_enclave/evidence.py", "wl_enclave/signing.py"):
+                      if required not in names:
+                          problems.append(f"{path.name}: missing {required}")
+
+          if problems:
+              print("::error::refusing to publish:")
+              for p in problems:
+                  print(f"  - {p}")
+              sys.exit(1)
+          print("OK: no key or credential material, verifier present.")
+          PY
+
+      # Installs the built wheel in a clean virtualenv and runs it. This is the
+      # gate that catches a dependency declared nowhere: `signing` imports
+      # `cryptography` lazily, so a missing declaration would not surface until
+      # a user ran keygen, by which point the release is permanent.
+      - name: Smoke-test the built wheel from a clean environment
+        run: |
+          set -euo pipefail
+          declared="$(python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet "dist/watchlight_enclave-${declared}-py3-none-any.whl"
+          got="$(/tmp/smoke/bin/wl-enclave --version)"
+          echo "installed: $got"
+          [ "$got" = "wl-enclave ${declared}" ] || { echo "::error::--version printed '$got', expected 'wl-enclave ${declared}'"; exit 1; }
+          # Exercises the lazy cryptography import through the real entry point.
+          XDG_CONFIG_HOME=/tmp/smoke-cfg /tmp/smoke/bin/wl-enclave keygen
+          /tmp/smoke/bin/wl-enclave hosts --help >/dev/null
+          echo "OK: the published wheel installs, signs and runs."
+
+      - name: Publish (trusted publishing / OIDC)
+        if: ${{ !inputs.dry_run }}
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: dist
+          repository-url: >-
+            ${{ inputs.repository == 'pypi'
+                && 'https://upload.pypi.org/legacy/'
+                || 'https://test.pypi.org/legacy/' }}
+          print-hash: true
+
+      - name: Dry run — nothing was uploaded
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "::notice::Dry run. Artifacts built and validated, upload skipped."
+          ls -la dist
