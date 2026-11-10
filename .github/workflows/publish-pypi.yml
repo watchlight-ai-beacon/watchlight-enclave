@@ -21,29 +21,38 @@
 #      gates below inspected, with no upload/download round trip in between
 #      where a different file could take their place.
 #
-# ─── OPERATOR PREREQUISITES (one-time, before the first real publish) ───
-#   1. Reserve `watchlight-enclave` on TestPyPI and PyPI UNDER the
-#      `watchlight-ai` PyPI ORG, not a personal account. PyPI names are global
-#      with no per-org namespacing. Skip a placeholder upload and go straight
-#      to the pending trusted publisher in (2); the first publish then creates
-#      the org-owned project, token-free.
-#   2. Configure a PyPI **Trusted Publisher** (OIDC) for this workflow.
-#      ⚠️ Two namespaces: the PyPI org (`watchlight-ai`) is NOT the GitHub org
-#      (`watchlight-ai-beacon`). This form wants the GitHub ones:
-#        PyPI project name: watchlight-enclave   (owned by the watchlight-ai org)
-#        Owner (GitHub):    watchlight-ai-beacon
-#        Repository:        watchlight-enclave
+# There is no TestPyPI path here, on purpose. A rehearsal index we do not use
+# is a second publisher registration to keep in step with this file, and a
+# config that is never exercised is the one most likely to be wrong when it
+# finally matters. The dry run below is the rehearsal: it builds the real
+# artifacts and runs every gate, and differs from a publish only in the upload.
+#
+# ─── OPERATOR PREREQUISITES (one-time, before the first publish) ───
+#   1. Configure a PyPI **Trusted Publisher** (OIDC) for this workflow, at
+#      https://pypi.org/manage/account/publishing/ — a *pending* publisher,
+#      since the project does not exist yet. The first publish then creates it,
+#      with no API token anywhere. Reserving the name with a placeholder upload
+#      is unnecessary and would make the project personally owned.
+#      ⚠️ Two namespaces with similar names: the PyPI org is `watchlight-ai`,
+#      the GitHub org is `watchlight-ai-beacon`. This form wants the GitHub one
+#      in Owner. If there is an organization selector, choose `watchlight-ai`
+#      so the project is org-owned from the first upload rather than needing a
+#      transfer later.
+#        PyPI Project Name: watchlight-enclave
+#        Owner:             watchlight-ai-beacon
+#        Repository name:   watchlight-enclave
 #        Workflow name:     publish-pypi.yml
-#        Environment:       pypi    (repeat on TestPyPI with environment: testpypi)
-#   3. Create the `pypi` and `testpypi` GitHub Environments, optionally with a
-#      required reviewer, so a publish is an explicit approved action.
+#        Environment name:  pypi
+#   2. Create the `pypi` GitHub Environment, optionally with a required
+#      reviewer, so a publish is an explicit approved action. A reviewer gates
+#      dry runs too, since the job declares the environment either way; both
+#      are manual dispatches, so that is a click, not a loss of a capability.
 #
 # ─── HOW TO RUN ───
-#   Dry run from a branch, to TestPyPI:
-#     gh workflow run publish-pypi.yml
-#   Real publish, which must be from the release tag:
-#     gh workflow run publish-pypi.yml --ref v0.2.0 \
-#       -f repository=pypi -f dry_run=false
+#   Rehearse from any ref — builds and validates, uploads nothing:
+#     gh workflow run publish-pypi.yml --ref main
+#   Publish, which must come from the release tag:
+#     gh workflow run publish-pypi.yml --ref v0.2.1 -f dry_run=false
 #
 # ─── Action pinning ───
 #   Third-party actions are SHA-pinned to an immutable commit with the
@@ -55,13 +64,8 @@ name: Publish watchlight-enclave (PyPI)
 on:
   workflow_dispatch:
     inputs:
-      repository:
-        description: "Target index"
-        type: choice
-        options: [testpypi, pypi]
-        default: testpypi
       dry_run:
-        description: "Build and validate, but SKIP the upload"
+        description: "Build and validate, but SKIP the upload to PyPI"
         type: boolean
         default: true
 
@@ -69,31 +73,30 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.repository }}
+  group: ${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: "Build, validate${{ inputs.dry_run && ' (dry run)' || format(', publish to {0}', inputs.repository) }}"
+    name: "Build, validate${{ inputs.dry_run && ' (dry run)' || ', publish to PyPI' }}"
     runs-on: ubuntu-latest
-    # The environment scopes the OIDC trusted-publisher config and can require
-    # an approver. `pypi` publishes to PyPI, `testpypi` to TestPyPI.
-    environment: ${{ inputs.repository }}
+    # Scopes the OIDC trusted-publisher config and can require an approver.
+    environment: pypi
     permissions:
       contents: read
       id-token: write # OIDC — trusted publishing mints a short-lived token
     steps:
-      # A real publish is immutable and a filename can never be reused, so the
-      # ref it came from has to be the thing the tag names. TestPyPI stays open
-      # to any ref because its whole use is rehearsing from a branch.
-      - name: A publish to PyPI must come from a release tag
-        if: ${{ inputs.repository == 'pypi' }}
+      # A publish is immutable and a filename can never be reused, so the ref
+      # it came from has to be the thing the tag names. A dry run stays open to
+      # any ref: rehearsing from a branch is the whole point of it.
+      - name: A publish must come from a release tag
+        if: ${{ !inputs.dry_run }}
         env:
           GH_REF: ${{ github.ref }}
         run: |
           case "$GH_REF" in
             refs/tags/v*) echo "Release tag: $GH_REF" ;;
-            *) echo "::error::Publishing to PyPI requires a release tag: gh workflow run publish-pypi.yml --ref v<X.Y.Z> -f repository=pypi -f dry_run=false (got $GH_REF)"; exit 1 ;;
+            *) echo "::error::Publishing requires a release tag: gh workflow run publish-pypi.yml --ref v<X.Y.Z> -f dry_run=false (got $GH_REF)"; exit 1 ;;
           esac
 
       - uses: actions/checkout@v7
@@ -222,10 +225,9 @@ jobs:
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:
           packages-dir: dist
-          repository-url: >-
-            ${{ inputs.repository == 'pypi'
-                && 'https://upload.pypi.org/legacy/'
-                || 'https://test.pypi.org/legacy/' }}
+          # Stated rather than left to the action's default, so the index this
+          # uploads to is readable here.
+          repository-url: https://upload.pypi.org/legacy/
           print-hash: true
 
       - name: Dry run — nothing was uploaded
