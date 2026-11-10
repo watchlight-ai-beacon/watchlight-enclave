@@ -26,13 +26,60 @@ field means is a bump. This number has to age well: a bundle in someone's
 compliance archive must stay verifiable for as long as they keep it.
 
 1.0 is gated on the manifest reaching its final shape. Operator signing is in
-(see Unreleased), but witness cosignatures ([#2–#6]) are the part that decides
+(see 0.2.0), but witness cosignatures ([#2–#6]) are the part that decides
 what a sealed manifest ultimately holds. Promising format stability before then
 would mean breaking that promise immediately.
 
 ## [Unreleased]
 
 Nothing yet.
+
+## [0.2.1] — 2026-11-10
+
+**Packaging only.** No change to the CLI, to `enclave.yaml`, to how strictly
+`verify` reads a bundle, or to the bundle format. Nothing here can change the
+verdict on a bundle you already hold.
+
+This is the first release on PyPI: `pip install watchlight-enclave`. 0.2.0 was
+tagged before the publishing workflow existed, and a publish must come from a
+tag that carries it, so the first published version is this one. 0.2.0 remains
+a GitHub release and an install from source; nothing was published under it.
+
+### Added
+
+- **`publish-pypi.yml`** — publishing over OIDC trusted publishing, so no
+  long-lived API token exists in the repository or anywhere else. Manual, and
+  a dry run unless told otherwise. Four gates, each refusing rather than
+  warning, because a PyPI filename is permanent and a bad upload cannot be
+  corrected in place, only yanked:
+  - a publish must come from a `v*` tag;
+  - `pyproject.toml`, `wl_enclave.__version__` and the tag must agree, and
+    exactly one wheel and one sdist must name that version;
+  - no key or credential material in either distribution — `wl-enclave
+    keygen` writes Ed25519 private keys as `.pem` files, so a key left in the
+    working tree is a real way to publish one by accident — and no wheel
+    missing `evidence.py` or `signing.py`, since the verifier is the thing
+    third parties are promised;
+  - the built wheel is installed in a clean virtualenv and run, including
+    `keygen`, which exercises the lazy `cryptography` import through the real
+    entry point. An undeclared dependency would otherwise surface only when a
+    user tried to sign.
+- **`github-release.yml`** — release notes taken from this file rather than
+  written twice. The notes state which of the three contracts a release moved,
+  and a reader deciding whether an upgrade breaks their CI gate relies on that
+  being accurate; a second copy drifts. A missing or empty section for the
+  tagged version fails the run rather than falling back to generated notes.
+
+### Changed
+
+- The sdist is an explicit include list instead of hatchling's default, which
+  is the whole working tree minus VCS ignores. The files it had been sweeping
+  in were harmless — CI config, a scanner baseline — but the default is *open*,
+  so anything added to the repository later would ship by default and nobody
+  would find out until it was on an immutable index. `tests/` and `crates/`
+  are included deliberately: the forgery tests are how a third party confirms
+  the verifier refuses what it says it refuses, and the guard crate is where
+  record-before-forward lives.
 
 ## [0.2.0] — 2026-11-10
 
@@ -199,7 +246,8 @@ Each is stated in the bundle or the docs rather than left to be discovered.
 - **The workspace is writable**, so a run can edit the rules the next run is
   held to. Made visible with digests rather than prevented. [#13]
 
-[Unreleased]: https://github.com/watchlight-ai-beacon/watchlight-enclave/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/watchlight-ai-beacon/watchlight-enclave/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/watchlight-ai-beacon/watchlight-enclave/releases/tag/v0.2.1
 [0.2.0]: https://github.com/watchlight-ai-beacon/watchlight-enclave/releases/tag/v0.2.0
 [0.1.0]: https://github.com/watchlight-ai-beacon/watchlight-enclave/releases/tag/v0.1.0
 [#2–#6]: https://github.com/watchlight-ai-beacon/watchlight-enclave/issues/2
