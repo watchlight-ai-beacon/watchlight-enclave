@@ -36,9 +36,11 @@ Nothing yet.
 
 ## [0.2.1] — 2026-11-10
 
-**Packaging and documentation only.** No change to the CLI, to `enclave.yaml`,
-to how strictly `verify` reads a bundle, or to the bundle format. Nothing here
-can change the verdict on a bundle you already hold.
+**Packaging, documentation, and what `keygen` prints.** No change to
+`enclave.yaml`, to how strictly `verify` reads a bundle, or to the bundle
+format. Nothing here can change the verdict on a bundle you already hold. The
+one behavioural change is two output labels in `keygen`, which matters only if
+you parse them.
 
 This is also the release where the repository became public.
 
@@ -103,6 +105,21 @@ a GitHub release and an install from source; nothing was published under it.
 
 ### Changed
 
+- **`keygen` says `private key` and `public key id`**, where it said `key` and
+  `key id`. One is a file to protect and the other is a string to publish, and
+  the old labels left the reader to work that out. Getting it backwards goes
+  wrong in both directions: pasting a private key into a ticket, or withholding
+  the one value a reviewer needs in order to pin a signer. The command now also
+  states that the private key stays in its file and is not copied into a
+  bundle, mounted into the sandbox, or sent anywhere — the question the old
+  output invited and did not answer. **If you parse `keygen` output, match on
+  `public key id`.**
+- `signing.exposed_by()` is documented correctly. It is the check that refuses
+  a run when the signing key sits inside a directory mounted into the sandbox,
+  which is the guard against an agent reading the key that signs its own
+  evidence. Its docstring described the symlink case backwards, and the test
+  covering that case was named for the opposite of what it asserted. The
+  behaviour was right; only the description was wrong.
 - The sdist is an explicit include list instead of hatchling's default, which
   is the whole working tree minus VCS ignores. The files it had been sweeping
   in were harmless — CI config, a scanner baseline — but the default is *open*,
