@@ -32,7 +32,30 @@ would mean breaking that promise immediately.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **The sandbox is attested before the agent runs, not alongside it**
+  ([#22](https://github.com/watchlight-ai-beacon/watchlight-enclave/issues/22)).
+  `provision` started the container with the agent as its first process, so the
+  agent was already working while `attest` read the boundary back. On a fast
+  host it could finish first, and the attestation then described a container
+  that no longer existed: every probe failed, which read as a sandbox that
+  could not be observed and turned a healthy run into `INCOMPLETE`. The
+  positive control is what caught it rather than letting it pass as a mask that
+  held.
+
+  The deeper problem was the order. The check that establishes the agent cannot
+  reach its own evidence ran *after* the agent had the chance to reach it.
+
+  The sandbox now comes up holding, with no agent code in it. `attest` reads
+  the boundary out of the live container, and a new `RuntimeDriver.release()`
+  starts the agent only once that is recorded. The chain is hash-linked in
+  order, so `sandbox.attested` provably precedes every record the agent
+  authored.
+
+  Driver authors: `provision` must not run `spec.command`, `wait` now follows
+  the agent rather than the container, and `logs` returns the agent's output.
+  The sandbox outlives what it was holding for.
 
 ## [0.2.1] — 2026-11-10
 

@@ -6,13 +6,34 @@ your `enclave.yaml` picks one.
 ```python
 name: str
 def preflight(self) -> list[str]        # problems, never raises
-def provision(self, spec) -> Sandbox
+def provision(self, spec) -> Sandbox    # starts the sandbox HOLDING
 def attest(self, sandbox) -> dict       # read BACK out of the runtime
-def wait(self, sandbox, timeout) -> Optional[int]
+def release(self, sandbox) -> None      # only now does the agent run
+def wait(self, sandbox, timeout) -> Optional[int]   # the agent's status
 def logs(self, sandbox) -> str
 def quarantine(self, sandbox) -> None   # kill now, don't cooperate
 def teardown(self, sandbox) -> None
 ```
+
+`provision` and `release` are two halves of starting a run, and the split is
+the point. A driver must bring the sandbox up running *nothing of the agent's*
+— the Docker driver holds it with `sleep infinity` — so that `attest` reads the
+boundary out of a live container before any agent code exists to test it. A
+driver that starts the agent in `provision` still satisfies the type signatures
+and still produces an attestation, which is why this is written down rather
+than left to the shape of the protocol.
+
+It matters in both directions. The attestation used to race the agent, and on a
+fast host it described a container that had already exited: every probe failed,
+which read as a sandbox that could not be observed and turned a healthy run
+into `INCOMPLETE`. And the check that establishes the agent cannot reach its own
+evidence ran *after* the agent could have reached it, which is the wrong order
+for a check that is supposed to protect something.
+
+One consequence to carry through a new driver: the agent is no longer the
+sandbox's first process, so `wait` must follow the agent and `logs` must return
+the agent's output, not the container's. The sandbox outlives what it was
+holding for.
 
 ## The question to ask of this seam
 
