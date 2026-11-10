@@ -1,0 +1,112 @@
+# Create the GitHub Release for a `v*` tag, with the body taken from
+# CHANGELOG.md.
+#
+# The changelog is the single source of truth for release notes. A hand-written
+# release body is a second copy of the same facts, and the two drift — which
+# matters more here than in most projects, because the notes state which of the
+# three contracts a release moved, and a reader deciding whether an upgrade
+# breaks their CI gate is relying on that being right.
+#
+# Manual, like `watchlight-beacon`'s equivalent: automatic Actions spend is
+# reserved for CI. The guard below refuses to run on anything but a `v*` tag.
+#
+#   gh workflow run github-release.yml --ref v<X.Y.Z>
+#
+# It publishes nothing to any index. PyPI is `publish-pypi.yml`'s job, and the
+# two are independent: this page is not evidence that the package published, so
+# the body links to PyPI rather than implying it.
+
+name: GitHub Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse anything but a release tag
+        env:
+          GH_REF: ${{ github.ref }}
+        run: |
+          case "$GH_REF" in
+            refs/tags/v*) echo "Release tag: $GH_REF" ;;
+            *) echo "::error::Run this on a release tag: gh workflow run github-release.yml --ref v<X.Y.Z> (got $GH_REF)"; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v7
+
+      - name: Take the release notes out of CHANGELOG.md
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pathlib, re, sys
+
+          tag = os.environ["TAG"]
+          version = tag[1:] if tag.startswith("v") else tag
+          if not re.fullmatch(r"\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?", version):
+              sys.exit(f"::error::tag {tag!r} does not yield a semver version")
+
+          text = pathlib.Path("CHANGELOG.md").read_text()
+          # Sections look like `## [0.2.0] — 2026-11-10`. Capture from this
+          # version's heading up to the next `## ` heading.
+          pattern = re.compile(
+              r"^## \[" + re.escape(version) + r"\][^\n]*\n(.*?)(?=^## |\Z)",
+              re.S | re.M,
+          )
+          found = pattern.search(text)
+          if not found:
+              # Fail rather than fall back to an empty or auto-generated body.
+              # A release whose notes silently went missing is worse than one
+              # that did not publish: the page would still look authoritative.
+              sys.exit(
+                  f"::error::CHANGELOG.md has no '## [{version}]' section. "
+                  f"Add one before tagging, or fix the tag."
+              )
+
+          body = found.group(1).strip()
+          if not body:
+              sys.exit(f"::error::the '## [{version}]' section in CHANGELOG.md is empty")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("body<<CHANGELOG_EOF\n")
+              out.write(body + "\n")
+              out.write("\n---\n\n")
+              out.write(
+                  f"Install: `pip install watchlight-enclave=={version}`\n\n"
+                  "This page is created by `github-release.yml` and the package is "
+                  "published by `publish-pypi.yml`. The two run independently, so "
+                  "this page is not itself evidence that the release reached PyPI — "
+                  f"check [PyPI](https://pypi.org/project/watchlight-enclave/{version}/).\n"
+              )
+              out.write("CHANGELOG_EOF\n")
+          print(f"Release notes for {version}: {len(body)} characters")
+          PY
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          BODY: ${{ steps.notes.outputs.body }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$BODY" > /tmp/release-notes.md
+          # --verify-tag so a typo cannot create a release against a tag that
+          # does not exist. No --generate-notes: the changelog is the source.
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes-file /tmp/release-notes.md \
+            --verify-tag \
+            --latest
