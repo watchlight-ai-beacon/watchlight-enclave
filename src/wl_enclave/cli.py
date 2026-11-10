@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from . import __version__, attestation, config, evidence, runs
+from . import __version__, attestation, config, evidence, runs, signing
 from .drivers import Egress, DriverError, Mount, SandboxSpec, get_driver
 from .egress import (
     EGRESS_UNRECOGNISED,
@@ -45,6 +45,30 @@ def _fail(msg: str, hint: Optional[str] = None) -> int:
     if hint:
         print(f"            {hint}", file=sys.stderr)
     return 1
+
+
+# ----------------------------------------------------------------- seal ----
+def _seal(
+    chain: evidence.ChainWriter,
+    signer: Optional[signing.Signer],
+    run_id: str,
+    agent: Optional[str],
+    runtime: Optional[str],
+    **extra: object,
+) -> Path:
+    """Seal a bundle, from the one place that decides what a manifest holds.
+
+    Four call sites used to build this payload independently and three of them
+    disagreed, which was survivable while the manifest was only read. It stops
+    being survivable once it is signed: a signature covers exactly these bytes,
+    so a field present on one path and absent on another is a difference a
+    reviewer has to explain, and the run that ended in error is the one whose
+    manifest a reviewer reads most carefully.
+    """
+    return chain.seal(
+        {"run": run_id, "agent": agent, "runtime": runtime, **extra},
+        signer=signer,
+    )
 
 
 # ------------------------------------------------------------------ init ---
@@ -185,6 +209,32 @@ def _cmd_run(args: argparse.Namespace) -> int:
             problems[1] if len(problems) > 1 else "run `wl-enclave doctor`",
         )
 
+    # Resolved before the run opens, so a key named but unreadable fails here
+    # rather than at the seal. Failing at the seal would be the worst place for
+    # it: the run has already happened, and the operator asked for evidence
+    # they can attribute and would get a bundle that cannot be.
+    try:
+        signer = signing.resolve(getattr(args, "sign_key", None))
+    except signing.SigningError as exc:
+        return _fail(str(exc))
+
+    # Refused, not warned about. The workspace is mounted into the sandbox
+    # writable, so a key inside it is a key the agent can read — and a key
+    # holder can re-seal a truncated chain, which makes this the one mistake
+    # that converts the evidence bundle into something the agent writes about
+    # itself. A warning would be printed into a scrollback nobody reads at the
+    # moment it matters.
+    if signer is not None and signer.path is not None:
+        exposed = signing.exposed_by(signer.path, [cfg.root])
+        if exposed is not None:
+            return _fail(
+                f"the signing key {signer.path} is inside {exposed}, which is "
+                f"mounted into the sandbox — the agent could read it and sign "
+                f"its own evidence",
+                f"move it outside the workspace; the default is "
+                f"{signing.default_key_path()}",
+            )
+
     # Built before the run opens rather than inside it: a build failure is a
     # configuration problem, and recording it as part of a run would put a
     # pre-run error in a chain that is supposed to describe an agent.
@@ -284,7 +334,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             # Fail rather than fall back to an open network: a run that was
             # asked to mediate egress and silently did not is worse than no run.
             chain.append("run.error", {"error": f"egress guard: {exc}"})
-            chain.seal({"run": run.id, "agent": cfg.agent.name, "runtime": cfg.runtime})
+            _seal(chain, signer, run.id, cfg.agent.name, cfg.runtime)
             return _fail(f"egress guard: {exc}")
 
     def build_spec() -> SandboxSpec:
@@ -484,14 +534,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "egress_denied": egress_denied,
             },
         )
-        chain.seal(
-            {
-                "run": run.id,
-                "agent": cfg.agent.name,
-                "purpose": purpose,
-                "runtime": cfg.runtime,
-                "exit_status": status,
-            }
+        _seal(
+            chain,
+            signer,
+            run.id,
+            cfg.agent.name,
+            cfg.runtime,
+            purpose=purpose,
+            exit_status=status,
         )
 
         print()
@@ -516,7 +566,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     except DriverError as exc:
         chain.append("run.error", {"error": str(exc)})
-        chain.seal({"run": run.id, "agent": cfg.agent.name, "runtime": cfg.runtime})
+        _seal(chain, signer, run.id, cfg.agent.name, cfg.runtime)
         return _fail(str(exc))
     finally:
         # The sandbox goes first: while it is alive it can still reach the
@@ -555,6 +605,116 @@ def _cmd_ps(args: argparse.Namespace) -> int:
     for row in rows[: args.limit]:
         print(f"{row[0]:<24} {row[1]:<16} {row[2]:>7}  {row[3]:<8} {row[4]}")
     return 0
+
+
+def _human_bytes(n: int) -> str:
+    if not n:
+        return "-"
+    for unit in ("B", "kB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} GB"
+
+
+def _cmd_hosts(args: argparse.Namespace) -> int:
+    """Every host the agent reached, across runs — the question a reviewer asks.
+
+    The evidence for this existed from the first release and there was no way
+    to look at it, which left the product recording the thing it is best at and
+    offering no way to read it back.
+    """
+    root = Path(args.directory).resolve()
+    since = (args.since or "").replace("-", "")
+    if since and not (len(since) == 8 and since.isdigit()):
+        return _fail(
+            f"--since takes a date like 2026-11-03, not {args.since!r}",
+            "run ids begin with the UTC date, which is what this filters on",
+        )
+
+    hosts: dict[tuple, dict] = {}
+    verified = excluded = incomplete = 0
+    covers: set[str] = set()
+    blocked: set[str] = set()
+
+    for run in runs.iter_runs(root):
+        if since and run.id[:8] < since:
+            continue
+        result = evidence.verify(run.bundle_dir)
+        if result.verdict == "failed":
+            # Excluded *and* counted. Dropping it silently would make this list
+            # shorter and tidier than the truth, which is the one direction
+            # this output must never err in — the same reason a bundle reports
+            # its own gaps instead of omitting them.
+            excluded += 1
+            continue
+        verified += 1
+        if not result.complete:
+            incomplete += 1
+        for record in evidence.records(run.bundle_dir):
+            data = record.data
+            if record.type == "egress.attempt":
+                key = (data.get("host"), data.get("port"), data.get("verdict"))
+                entry = hosts.setdefault(key, {"n": 0, "sent": 0, "recv": 0, "ip": ""})
+                entry["n"] += 1
+                if data.get("resolved_ip"):
+                    entry["ip"] = data["resolved_ip"]
+            elif record.type == "egress.tunnel":
+                # Bytes arrive on their own record, and only for connections
+                # that were allowed, so they join onto the allow row.
+                key = (data.get("host"), data.get("port"), "allow")
+                entry = hosts.setdefault(key, {"n": 0, "sent": 0, "recv": 0, "ip": ""})
+                entry["sent"] += data.get("bytes_sent") or 0
+                entry["recv"] += data.get("bytes_received") or 0
+            elif record.type == "egress.attested":
+                covers.update(data.get("records_cover") or [])
+                blocked.update(data.get("blocked_not_recorded") or [])
+
+    if not verified and not excluded:
+        _say("no runs" + (f" since {args.since}" if args.since else ""))
+        return 0
+
+    _say(
+        f"runs     {verified} verified"
+        + (f", {excluded} EXCLUDED because their bundles do not verify" if excluded else "")
+    )
+    if covers:
+        # Printed with the answer, not in a footnote. "Which hosts did it
+        # reach" is only answerable within what the guard can see, and a
+        # reviewer reading this table is entitled to know the edge of it.
+        note = ", ".join(sorted(covers)) + " only"
+        if blocked:
+            note += f"; {', '.join(sorted(blocked))} had no route and are not recorded"
+        _say(f"coverage {note}")
+
+    print()
+    print(f"{'HOST':<28} {'PORT':>5}  {'VERDICT':<7} {'TRIES':>5} {'SENT':>9} {'RECV':>9}  LAST IP")
+    for (host, port, verdict), entry in sorted(
+        hosts.items(), key=lambda kv: (kv[0][2] != "deny", kv[0][0] or "")
+    ):
+        print(
+            f"{str(host)[:28]:<28} {str(port):>5}  {str(verdict):<7} {entry['n']:>5} "
+            f"{_human_bytes(entry['sent']):>9} {_human_bytes(entry['recv']):>9}  "
+            f"{entry['ip'] or '-'}"
+        )
+    print()
+
+    attempts = sum(e["n"] for e in hosts.values())
+    _say(f"{len(hosts)} host/verdict pair(s) over {attempts} attempt(s)")
+    if incomplete:
+        _say(
+            f"INCOMPLETE — {incomplete} run(s) report gaps in their own records, "
+            f"so this list is a lower bound"
+        )
+    if excluded:
+        _say(
+            f"the {excluded} excluded run(s) reached hosts that are NOT in this "
+            f"table; check them with `wl-enclave verify`"
+        )
+    # Non-zero when the answer is not both trustworthy and complete. A clean
+    # table printed beside a failed bundle is exactly the kind of reassuring,
+    # wrong summary this project exists to avoid.
+    return 0 if not (excluded or incomplete) else 1
 
 
 def _cmd_logs(args: argparse.Namespace) -> int:
@@ -607,7 +767,16 @@ def _cmd_kill(args: argparse.Namespace) -> int:
         "run.contained",
         {"reason": "operator", "command": "quarantine" if args.quarantine else "kill"},
     )
-    chain.seal({"run": run.id, "agent": meta.get("agent"), "runtime": driver.name})
+    # Resolved leniently here, unlike in `run`, and for the same reason
+    # containment happens before recording: an unreadable key must not leave a
+    # bundle unsealed. Sealing unsigned loses attribution, which `verify`
+    # reports; refusing to seal would lose the records themselves.
+    signer = None
+    try:
+        signer = signing.resolve(getattr(args, "sign_key", None))
+    except signing.SigningError as exc:
+        _say(f"sealing this bundle unsigned: {exc}")
+    _seal(chain, signer, run.id, meta.get("agent"), driver.name)
     _say(f"{action} {run.id}; bundle sealed")
     return 0
 
@@ -629,14 +798,46 @@ def _mask_for_runs(root: Path, runs_root: Path) -> list[Mount]:
     return [Mount.mask(f"/work/{relative.as_posix()}")]
 
 
+def _cmd_keygen(args: argparse.Namespace) -> int:
+    """Create the key that signs manifests."""
+    path = Path(args.path) if args.path else signing.default_key_path()
+    try:
+        signer = signing.generate(path, force=args.force)
+    except signing.SigningError as exc:
+        return _fail(str(exc))
+    _say(f"key      {signer.path}")
+    _say(f"key id   {signer.key_id}")
+    print()
+    _say("runs from here on will seal signed bundles.")
+    _say(
+        "a reviewer should pin this id: "
+        f"`wl-enclave verify <bundle> --signer {signer.key_id}`"
+    )
+    _say(
+        "without --signer, a signature only shows the manifest is unchanged — "
+        "the public key travels inside the bundle, so anyone can sign one."
+    )
+    return 0
+
+
 def _cmd_verify(args: argparse.Namespace) -> int:
     bundle = Path(args.bundle)
     if bundle.name != "bundle" and (bundle / "bundle").is_dir():
         bundle = bundle / "bundle"
-    result = evidence.verify(bundle)
+    # getattr, not attribute access: these are read the same way `--sign-key`
+    # is, so a caller building a Namespace by hand — which the tests and any
+    # embedding do — gets the documented defaults instead of an AttributeError.
+    expect_key = getattr(args, "signer", None)
+    result = evidence.verify(
+        bundle,
+        require_signature=getattr(args, "require_signature", False) or bool(expect_key),
+        expect_key=expect_key,
+    )
     _say(f"bundle   {bundle}")
     _say(f"records  {result.records}")
     _say(f"head     {result.head[:16]}…")
+    if result.signed:
+        _say(f"signed   {result.signer_key_id}")
     # Facts first, then problems, then the verdict. Problems read as part of
     # the verdict they cause, so nothing should come between them.
     if result.egress_attested is True:
@@ -677,10 +878,26 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             "note: egress records are a lower bound for this run — anything "
             "sent by another route is not in this bundle"
         )
+    # Three rungs, each with its own note, because the gap between them is
+    # exactly where a reviewer over-reads a bundle. "Signed" is the word they
+    # want to see and the one that establishes least.
     if result.ok and not result.signed:
         _say(
             "note: the chain is internally consistent but unsigned, so it "
             "proves nothing about who produced it"
+        )
+    elif result.ok and not result.signer_pinned:
+        _say(
+            "note: the signature shows this manifest is unchanged, not who "
+            "sealed it — the public key travels inside the bundle, so anyone "
+            "can produce a signed one. Pin the key you expect with "
+            f"`--signer {result.signer_key_id}`"
+        )
+    elif result.ok:
+        _say(
+            "note: sealed by the key you named. A holder of that key could "
+            "still have signed a truncated chain, and no witness cosigned "
+            "this bundle, so this is not yet proof against the signer"
         )
     # Non-zero for an incomplete bundle as well as a broken one. A gate that
     # passed a bundle the guard itself calls incomplete would make the
@@ -744,11 +961,39 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="run the agent in a sandbox")
     p_run.add_argument("--purpose", help="why this run exists; recorded in the evidence")
     p_run.add_argument("--keep", action="store_true", help="do not remove the sandbox")
+    p_run.add_argument(
+        "--sign-key",
+        metavar="PATH",
+        help=(
+            "private key to sign the manifest with "
+            f"(default: ${signing.ENV_KEY}, else {signing.default_key_path()}, "
+            "else seal unsigned)"
+        ),
+    )
     p_run.set_defaults(func=_cmd_run)
+
+    p_keygen = sub.add_parser("keygen", help="create the key that signs manifests")
+    p_keygen.add_argument(
+        "--path", help=f"where to write it (default: {signing.default_key_path()})"
+    )
+    p_keygen.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing key — signatures made with the old one cannot be remade",
+    )
+    p_keygen.set_defaults(func=_cmd_keygen)
 
     p_ps = sub.add_parser("ps", help="list runs, newest first")
     p_ps.add_argument("-n", "--limit", type=int, default=20)
     p_ps.set_defaults(func=_cmd_ps)
+
+    p_hosts = sub.add_parser(
+        "hosts", help="every host the agent reached, across runs"
+    )
+    p_hosts.add_argument(
+        "--since", metavar="DATE", help="only runs from this UTC date onward, e.g. 2026-11-03"
+    )
+    p_hosts.set_defaults(func=_cmd_hosts)
 
     p_logs = sub.add_parser("logs", help="print what a run's sandbox wrote")
     p_logs.add_argument("run", help="run id, or a unique prefix of one")
@@ -764,6 +1009,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_verify = sub.add_parser("verify", help="check an evidence bundle, offline")
     p_verify.add_argument("bundle", help="path to a bundle directory, or a run directory")
+    p_verify.add_argument(
+        "--signer",
+        metavar="KEY_ID",
+        help=(
+            "require the manifest to be signed by this key id "
+            "(the only form of this check that establishes who sealed it)"
+        ),
+    )
+    p_verify.add_argument(
+        "--require-signature",
+        action="store_true",
+        help="fail an unsigned bundle, without pinning which key signed it",
+    )
     p_verify.set_defaults(func=_cmd_verify)
 
     p_ev = sub.add_parser("evidence", help="work with evidence bundles")

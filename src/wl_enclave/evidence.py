@@ -50,16 +50,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from . import attestation
+from . import attestation, signing
 
 __all__ = [
     "GENESIS",
     "BrokenChain",
     "CHAIN_FILE",
     "MANIFEST_FILE",
+    "SIGNATURE_FIELDS",
     "Record",
     "ChainWriter",
     "VerifyResult",
+    "manifest_body",
     "verify",
 ]
 
@@ -72,7 +74,18 @@ MANIFEST_FILE = "manifest.json"
 
 #: Bundle format version, independent of the package version. A reviewer's
 #: verifier needs to know what it is reading years from now.
+#:
+#: Signatures did not move this. The rule is that the version changes when an
+#: older verifier would *misread* a newer bundle, and one that predates signing
+#: ignores the new fields and reports a signed bundle as unsigned — weaker than
+#: the truth, which is the only direction a stale verifier is allowed to err.
 FORMAT = "wl-enclave-evidence/1"
+
+#: Manifest keys a signature does not cover, because they carry the signatures
+#: themselves. Excluding ``cosignatures`` is what makes a witness addable later
+#: without invalidating the operator's signature: both sign the same bytes, and
+#: neither signs the other's entry.
+SIGNATURE_FIELDS = ("signature", "cosignatures")
 
 
 def _canonical(obj: Any) -> bytes:
@@ -82,6 +95,19 @@ def _canonical(obj: Any) -> bytes:
     Python's dict ordering or default spacing may leak into the digest.
     """
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def manifest_body(manifest: dict) -> bytes:
+    """The exact bytes a manifest signature covers.
+
+    One function, used by the writer and the verifier, because a signature is
+    only as good as both sides agreeing byte-for-byte on what was signed. A
+    second implementation that serialized even slightly differently would
+    produce a verification failure indistinguishable from tampering.
+    """
+    return _canonical(
+        {k: v for k, v in manifest.items() if k not in SIGNATURE_FIELDS}
+    )
 
 
 def _now() -> str:
@@ -211,12 +237,17 @@ class ChainWriter:
             n += 1
         return n
 
-    def seal(self, manifest: dict) -> Path:
+    def seal(self, manifest: dict, signer: Optional["signing.Signer"] = None) -> Path:
         """Write the manifest, pinning the chain's head and length.
 
         The head and count live in the manifest as well as in the chain so that
         a bundle with records removed from the end fails verification instead of
         simply looking shorter.
+
+        With a ``signer``, the manifest carries a signature over exactly the
+        bytes :func:`manifest_body` produces. ``cosignatures`` is written empty
+        either way: a reader should be able to tell a bundle that has no
+        witness from one whose witness list this build did not know to write.
         """
         full = {
             "format": FORMAT,
@@ -224,7 +255,10 @@ class ChainWriter:
             "records": self._seq,
             "head": self._head,
             **manifest,
+            "cosignatures": [],
         }
+        if signer is not None:
+            full["signature"] = signer.sign(manifest_body(full))
         out = self.dir / MANIFEST_FILE
         out.write_text(json.dumps(full, indent=2, sort_keys=True) + "\n")
         return out
@@ -268,6 +302,15 @@ class VerifyResult:
     head: str
     problems: list[str]
     signed: bool = False
+    #: The key that signed the manifest, when one did. Carried separately from
+    #: :attr:`signed` because a verifying signature and a *known* signer are
+    #: different claims: the public key travels in the bundle, so a signature
+    #: alone says the manifest is unchanged, not who sealed it.
+    signer_key_id: str = ""
+    #: ``True`` only when the caller named an expected key and it matched. This
+    #: is the rung that says something about *who*, and nothing sets it unless
+    #: a reviewer asked the question.
+    signer_pinned: bool = False
     #: ``True`` when the runtime confirmed the guard was the sandbox's only
     #: route, ``False`` when it did not, ``None`` when no guard ran. Not a
     #: chain problem: the chain can be perfectly intact and still describe a
@@ -335,7 +378,17 @@ class VerifyResult:
     def summary(self) -> str:
         if not self.ok:
             return f"FAILED — {len(self.problems)} problem(s)"
-        note = "signed" if self.signed else "unsigned"
+        # Three words, not two. "signed" on its own is what a reader wants to
+        # hear and more than the bundle establishes: the public key rides along
+        # in the manifest, so a verifying signature means the manifest is
+        # unchanged, not that a known party sealed it. Only a pinned key says
+        # who, and the summary is the line most likely to be quoted without
+        # the detail beneath it.
+        note = (
+            "signed by the expected key"
+            if self.signer_pinned
+            else "self-signed" if self.signed else "unsigned"
+        )
         if not self.contained:
             failed = ", ".join(attestation.failed_controls(self.controls))
             return (
@@ -418,11 +471,97 @@ def _reconcile_close(records: list[Record]) -> list[str]:
     return problems
 
 
-def verify(bundle_dir: Path) -> VerifyResult:
+def records(bundle_dir: Path) -> list[Record]:
+    """A bundle's records, parsed by the same reader :func:`verify` uses.
+
+    Exposed so that a caller wanting to read a bundle's contents cannot end up
+    with a second, more forgiving parser. A line this rejects must not be a
+    line some other feature silently accepts — that difference is how a
+    reporting command comes to describe a bundle the verifier would refuse.
+    """
+    return _read_chain(Path(bundle_dir) / CHAIN_FILE)
+
+
+def _check_signature(
+    manifest: dict, expect_key: Optional[str]
+) -> tuple[bool, str, bool, list[str]]:
+    """Check a manifest's signature, and whether it came from the pinned key.
+
+    Returns ``(signed, key_id, pinned, problems)``. A signature that verifies
+    but belongs to a key other than the expected one still returns
+    ``signed=True`` — it did verify — alongside a problem, because those are
+    two separate facts and collapsing them would report a validly signed
+    bundle as unsigned.
+    """
+    problems: list[str] = []
+    entry = manifest.get("signature")
+
+    # Cosignatures are checked whether or not an operator signature is present,
+    # and checked even though nothing writes them yet. A verifier that skipped
+    # the list would accept a forged witness entry the day one appears, and the
+    # whole point of reserving the slot now is that adding a real witness later
+    # needs no change here.
+    cosignatures = manifest.get("cosignatures")
+    if isinstance(cosignatures, list):
+        for i, cosignature in enumerate(cosignatures):
+            cosigned, detail = signing.check(manifest_body(manifest), cosignature)
+            if not cosigned:
+                problems.append(
+                    f"{MANIFEST_FILE}: cosignature {i} does not verify — {detail}"
+                )
+    elif cosignatures is not None:
+        problems.append(
+            f"{MANIFEST_FILE}: cosignatures is "
+            f"{type(cosignatures).__name__}, expected a list"
+        )
+
+    if entry is None:
+        if expect_key:
+            problems.append(
+                f"{MANIFEST_FILE}: not signed, but a signature from "
+                f"{expect_key} was required"
+            )
+        return False, "", False, problems
+
+    ok, detail = signing.check(manifest_body(manifest), entry)
+    if not ok:
+        problems.append(f"{MANIFEST_FILE}: signature does not verify — {detail}")
+        return False, "", False, problems
+
+    key_id = detail
+    pinned = False
+    if expect_key:
+        if key_id == expect_key:
+            pinned = True
+        else:
+            problems.append(
+                f"{MANIFEST_FILE}: signed by {key_id}, not by the required "
+                f"{expect_key}"
+            )
+    return True, key_id, pinned, problems
+
+
+def verify(
+    bundle_dir: Path,
+    require_signature: bool = False,
+    expect_key: Optional[str] = None,
+) -> VerifyResult:
     """Recompute a bundle's chain and check it against its manifest.
 
     Offline and self-contained: no account, no network, no Watchlight. Every
     problem found is reported, so one run tells a reviewer everything.
+
+    ``require_signature`` and ``expect_key`` are both off by default, so this
+    reads an unsigned bundle exactly as it did before signing existed. That
+    default is deliberate: tightening it would break every gate standing on a
+    bundle sealed by an older build, which is the failure mode the separately
+    versioned verifier contract exists to avoid.
+
+    The two land on different verdicts, because they fail differently. A
+    missing signature where one was required is a gap — everything in the
+    bundle is still true — so it reads ``incomplete``. A signature that does
+    not verify, or one from a key other than the pinned one, is a positive
+    contradiction, so it reads ``failed``.
     """
     bundle_dir = Path(bundle_dir)
     problems: list[str] = []
@@ -458,6 +597,10 @@ def verify(bundle_dir: Path) -> VerifyResult:
 
     head = records[-1].hash if records else GENESIS
 
+    signed = False
+    signer_key_id = ""
+    signer_pinned = False
+
     manifest_path = bundle_dir / MANIFEST_FILE
     if not manifest_path.is_file():
         problems.append(f"no {MANIFEST_FILE} — the bundle was never sealed")
@@ -484,6 +627,10 @@ def verify(bundle_dir: Path) -> VerifyResult:
                     f"{MANIFEST_FILE}: says {manifest.get('records')} records, "
                     f"the chain holds {len(records)}"
                 )
+            signed, signer_key_id, signer_pinned, sig_problems = _check_signature(
+                manifest, expect_key
+            )
+            problems.extend(sig_problems)
 
     # Read from the chain rather than recomputed: this reports what the run
     # claimed about its own topology, which the chain's integrity is what makes
@@ -672,12 +819,24 @@ def verify(bundle_dir: Path) -> VerifyResult:
             f"bearing on containment cannot be judged"
         )
 
+    # Incomplete rather than failed, and the distinction is the whole point of
+    # having four verdicts: every record in an unsigned bundle is still true,
+    # and what is missing is attribution. A caller that wants this to be fatal
+    # gets that from the exit status, since only `ok` exits 0.
+    if require_signature and not signed:
+        incomplete_reasons.append(
+            "the bundle carries no signature, and this check required one, so "
+            "nothing here establishes who produced it"
+        )
+
     return VerifyResult(
         ok=not problems,
         records=len(records),
         head=head,
         problems=problems,
-        signed=False,
+        signed=signed,
+        signer_key_id=signer_key_id,
+        signer_pinned=signer_pinned,
         egress_attested=egress_attested,
         egress_covers=egress_covers,
         complete=not incomplete_reasons,

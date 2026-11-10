@@ -86,6 +86,19 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
 
+      # Before the run, so the bundle this job produces is a signed one. The
+      # unit tests sign a hand-built chain; only this exercises the seal path
+      # the CLI actually takes, including the error paths that seal a bundle
+      # when a run fails.
+      - name: generate a signing key
+        id: keygen
+        run: |
+          out="$(wl-enclave keygen)"
+          echo "$out"
+          key_id="$(printf '%s\n' "$out" | awk '/key id/ {print $NF}')"
+          test -n "$key_id"
+          echo "key_id=$key_id" >> "$GITHUB_OUTPUT"
+
       - name: run the example agent under enclave
         run: wl-enclave -C examples/coder run --purpose "ci"
 
@@ -93,6 +106,38 @@ jobs:
         run: |
           bundle="$(ls -dt examples/coder/runs/*/bundle | head -1)"
           wl-enclave verify "$bundle"
+
+      - name: the bundle must be signed by the key we just made
+        # --signer, not --require-signature: the weaker flag passes for a
+        # bundle signed by any key at all, which would not catch a seal that
+        # silently used a different one.
+        run: |
+          bundle="$(ls -dt examples/coder/runs/*/bundle | head -1)"
+          wl-enclave verify "$bundle" --signer '${{ steps.keygen.outputs.key_id }}'
+          wl-enclave verify "$bundle" | grep -q 'signed'
+
+      - name: a key inside the mounted workspace must be refused
+        # The policy function is unit-tested; this is the only check that the
+        # CLI actually consults it. It fails before the sandbox starts, so it
+        # is not exposed to the attestation race in #22.
+        run: |
+          cp ~/.config/wl-enclave/signing.key examples/coder/inside.key
+          if wl-enclave -C examples/coder run --purpose "ci" \
+               --sign-key examples/coder/inside.key; then
+            echo "a signing key readable by the agent was accepted"
+            exit 1
+          fi
+          rm -f examples/coder/inside.key
+
+      - name: a bundle signed by another key must not pass a pin
+        # The check that proves --signer is load-bearing rather than decorative.
+        run: |
+          bundle="$(ls -dt examples/coder/runs/*/bundle | head -1)"
+          other="sha256:$(printf '0%.0s' $(seq 64))"
+          if wl-enclave verify "$bundle" --signer "$other"; then
+            echo "a pinned key that did not sign this bundle was accepted"
+            exit 1
+          fi
 
       - name: the bundle must say what it is supposed to say
         # Exit 0 alone would pass for a bundle that recorded nothing. These

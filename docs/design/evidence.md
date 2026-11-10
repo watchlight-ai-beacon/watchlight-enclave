@@ -56,17 +56,35 @@ hash still checks out perfectly. Nothing *inside* the chain knows how long it
 should have been.
 
 The manifest knows — `records: 11` — which is exactly why the manifest is the
-thing worth signing. But right now it's unsigned, so whoever truncates the
-chain can just edit the manifest to match. `verify` tells you this:
+thing we sign. An Ed25519 signature covers the manifest body, so whoever
+truncates the chain can no longer just edit the count to match: without the key
+they cannot produce a manifest that verifies.
 
-```text
-note: the chain is internally consistent but unsigned, so it proves nothing
-      about who produced it
+**With the key, they still can**, and that is worth being blunt about because
+it is the part people assume signing fixed. The key holder truncates the chain,
+appends a `run.close` whose counts agree with what's left, re-seals, and the
+bundle verifies as `ok` against a pinned key — with a denial simply gone. There
+is a test that performs that forgery and asserts it succeeds, so nobody can
+quietly upgrade the claim:
+
+```
+test_a_key_holder_can_still_reseal_a_truncated_chain
 ```
 
-That's the honest statement of where we are. Signing is issues #2–#6, and #5
-specifically covers checkpoint signatures during a run, which is what bounds
-how much an attacker can cut off the end.
+Why we shipped it anyway: it moves the attacker from *anyone who can write the
+file* to *whoever holds the key*, which is a much smaller set and one you can
+put in an HSM. What it does not do is make a bundle evidence against its own
+operator. For that, the signature has to come from somewhere the operator
+can't reach — a cosignature from a witness they don't run. Every manifest
+carries an empty `cosignatures` list for exactly that, and the verifier already
+checks entries in it, so adding a witness later needs no format change and no
+verifier change. That work is issues #2–#6; #5 covers checkpoint signatures
+during a run, which is what would bound how much can be cut off the end.
+
+So, precisely: a signature here means *this is the bundle that key sealed, and
+nothing has changed since*. It does not mean *this is everything that
+happened*. `verify` prints `unsigned`, `self-signed` or `signed by the expected
+key` to keep those apart, and only the third says anything about who.
 
 ## Verify before you extend
 
@@ -90,7 +108,7 @@ an agent that corrupted its own bundle a way to keep running.
 $ wl-enclave verify runs/20261105-010615-b534ef/bundle
 wl-enclave: controls 11/11 in force
 wl-enclave: governed by sha256:c63334f542a4b405f6f8099cc7889c801d0b5969c5d4cfd0359915d15c5e627f
-wl-enclave: OK — 11 records, chain intact, unsigned
+wl-enclave: OK — 11 records, chain intact, signed by the expected key
 ```
 
 | Verdict | Exit | What it means |
