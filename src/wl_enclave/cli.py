@@ -805,8 +805,16 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
         signer = signing.generate(path, force=args.force)
     except signing.SigningError as exc:
         return _fail(str(exc))
-    _say(f"key      {signer.path}")
-    _say(f"key id   {signer.key_id}")
+    # "private key" and "public key id" rather than "key" and "key id": the
+    # first is a file to protect, the second is a string to publish, and a
+    # reader who mixes them up either pastes a private key into a ticket or
+    # refuses to share the one value a reviewer needs. The wider column is
+    # local to this command so the two labels line up with each other.
+    _say(f"private key   {signer.path}")
+    _say(f"public key id {signer.key_id}")
+    print()
+    _say("the private key stays in that file. it is not copied into a bundle,")
+    _say("not mounted into the sandbox, and never sent anywhere.")
     print()
     _say("runs from here on will seal signed bundles.")
     _say(
