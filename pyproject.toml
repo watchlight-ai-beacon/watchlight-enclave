@@ -6,19 +6,47 @@ build-backend = "hatchling.build"
 name = "watchlight-enclave"
 version = "0.2.1"
 description = "Watchlight AI Enclave — a governed, isolated runtime for autonomous AI agents."
-readme = "README.md"
+readme = "README-pypi.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Watchlight AI" }]
-keywords = ["ai-agents", "sandbox", "governance", "authorization", "cedar"]
+keywords = [
+    "ai-agents",
+    "sandbox",
+    "governance",
+    "authorization",
+    "cedar",
+    "audit-trail",
+    "evidence",
+    "agent-security",
+]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
 ]
 dependencies = ["PyYAML>=6.0", "cryptography>=42.0"]
+
+# The sidebar on the package page. Without these the page has no route back to
+# the source, which for a project whose claim is "read the verifier yourself"
+# is the one link that has to be there.
+[project.urls]
+Homepage = "https://github.com/watchlight-ai-beacon/watchlight-enclave"
+Source = "https://github.com/watchlight-ai-beacon/watchlight-enclave"
+Documentation = "https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/docs/README.md"
+Changelog = "https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/CHANGELOG.md"
+Issues = "https://github.com/watchlight-ai-beacon/watchlight-enclave/issues"
+"Security policy" = "https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/SECURITY.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3.4"]
@@ -48,7 +76,10 @@ include = [
   "/examples",
   "/crates",
   "/README.md",
+  "/README-pypi.md",
   "/CHANGELOG.md",
+  "/SECURITY.md",
+  "/CODE_OF_CONDUCT.md",
   "/CONTRIBUTING.md",
   "/LICENSE",
   "/pyproject.toml",
