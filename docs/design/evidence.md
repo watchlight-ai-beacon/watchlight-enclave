@@ -140,10 +140,29 @@ that's a trap: a bundle with no records at all would sail through.
 
 So `verify` also checks that records which *must* exist do exist.
 
-**A run ends exactly once.** One of `run.close`, `run.contained`, or
-`run.error`. Zero of them is `FAILED` — a chain with no ending is
-indistinguishable from one that got truncated. More than one means something
-else has been writing records.
+**A run ends exactly once, and being stopped is not the same as ending.**
+`run.close` and `run.error` end a run: at most one, and it is the last record,
+because anything after it describes a run that had already finished. Zero
+endings *and* no `run.contained` is `FAILED` — a chain with no ending at all is
+indistinguishable from one that got truncated.
+
+`run.contained` says the run was **stopped**, by its timeout or by an operator
+reaching for `kill`. It is not an ending, because a stopped run still closes:
+the timeout path contains the sandbox and then seals with `run.close` and its
+tallies, having genuinely done both. It may be the last record, when whatever
+would have closed the chain never got to.
+
+Treating all three as endings and counting them was wrong in both directions. A
+killed run whose chain ended at `run.contained` counted as one clean ending and
+verified `OK`, the same verdict as a run that completed — a bundle understating
+what happened. A timed-out run counted as two and returned `FAILED` on evidence
+that was sound, so an operator could not tell a properly contained run from a
+broken bundle, because both exited 1.
+
+**`run.contained` caps out at `INCOMPLETE`.** Whatever the agent had not done
+when it was stopped is absent from the bundle, and absent is not clean. The
+reason says which kind of stop, so an operator reading the verdict knows
+whether a limit fired or a person intervened.
 
 **`run.error` caps out at `INCOMPLETE`.** A run that died during startup never
 attested anything, and the absence of those records is not evidence of a clean
@@ -177,7 +196,8 @@ Written by the host:
 | `egress.guard_stopped` | the guard wasn't running when the run ended |
 | `decision` | one authorization decision, stamped `asserted_by: sandbox` |
 | `decision.ingest` | what got dropped, truncated, or rejected at the boundary |
-| `run.close` / `run.contained` / `run.error` | how it ended, with tallies |
+| `run.close` / `run.error` | how it ended, with tallies |
+| `run.contained` | that it was stopped, and why — not an ending |
 
 Written by the guard, accepted only against a closed set of types:
 

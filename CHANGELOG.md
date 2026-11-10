@@ -34,6 +34,41 @@ would mean breaking that promise immediately.
 
 ### Fixed
 
+- **⚠️ `verify` is stricter: a run that was stopped no longer verifies as `ok`**
+  ([#35](https://github.com/watchlight-ai-beacon/watchlight-enclave/issues/35)).
+  This changes the verdict on bundles you already hold, which is the second of
+  the three contracts this project versions separately. **A CI gate that passed
+  on a contained run will now fail.** That is the point: it was passing on
+  evidence that understated what happened.
+
+  `verify` asked how many terminal records a chain held and required exactly
+  one. That counted two different things as one, and was wrong both ways.
+
+  A run killed by `wl-enclave kill`, whose chain ends at `run.contained`
+  because nothing came along to close it, counted as a single clean ending and
+  verified **`ok`** — the same verdict as a run that ran to completion. The
+  agent was stopped, whatever it had not done is absent, and the bundle said
+  nothing about it. This is the half that mattered.
+
+  A run stopped by its own timeout records `run.contained` and then seals with
+  `run.close` and its tallies, because it genuinely did both. Counting gave two
+  endings and returned **`failed`** on a sound bundle, so an operator could not
+  tell "properly contained" from "broken bundle" — both exited 1.
+
+  Both now verify `incomplete`, and the verdict says which kind of stop and
+  why. `run.close` and `run.error` end a run; `run.contained` says it was
+  stopped and may be the last record without being clean.
+
+  Also now caught: **records appended after the ending**. A chain whose
+  `run.close` was followed by more records described a run that had already
+  ended, and verified `ok` with nothing looking for it. Truncation from the end
+  was already caught by the manifest's head and count; this is the opposite
+  case.
+
+- The `INCOMPLETE — by the bundle's own account:` heading no longer claims to
+  be about egress. The label was copied from the controls block above it and
+  showed on every incomplete bundle, whatever the reason.
+
 - **The sandbox is attested before the agent runs, not alongside it**
   ([#22](https://github.com/watchlight-ai-beacon/watchlight-enclave/issues/22)).
   `provision` started the container with the agent as its first process, so the
