@@ -95,7 +95,7 @@ jobs:
         run: |
           out="$(wl-enclave keygen)"
           echo "$out"
-          key_id="$(printf '%s\n' "$out" | awk '/key id/ {print $NF}')"
+          key_id="$(printf '%s\n' "$out" | awk '/public key id/ {print $NF}')"
           test -n "$key_id"
           echo "key_id=$key_id" >> "$GITHUB_OUTPUT"
 

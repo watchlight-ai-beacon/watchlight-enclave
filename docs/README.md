@@ -301,12 +301,13 @@ perfectly valid chain.
 Run `wl-enclave keygen` once. It writes an Ed25519 key to
 `~/.config/wl-enclave/signing.key` at mode 0600 — outside your repository, so
 it cannot be committed, and outside the bundle, so it cannot travel with the
-evidence it signs — and prints a key id. Runs seal a signed manifest from then
-on. Point `--sign-key` or `$WL_ENCLAVE_SIGNING_KEY` somewhere else if you keep
+evidence it signs — and prints the **public key id** derived from it. The
+private key stays in that file: it is never copied into a bundle, mounted into
+the sandbox, or sent anywhere. Runs seal a signed manifest from then on. Point `--sign-key` or `$WL_ENCLAVE_SIGNING_KEY` somewhere else if you keep
 keys elsewhere; a path you name explicitly and that does not exist is an error
 rather than a quiet unsigned seal.
 
-Then give reviewers the key id, because `verify` grades the claim in three
+Then give reviewers the public key id, because `verify` grades the claim in three
 steps and only the last one says anything about *who*:
 
 | What `verify` prints | What it establishes |

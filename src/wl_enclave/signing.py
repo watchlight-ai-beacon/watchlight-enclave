@@ -262,8 +262,12 @@ def exposed_by(key_path: Path, roots: "Iterable[Path]") -> Optional[Path]:
     moment and sign the result. That is the single worst outcome available in
     this design, and it is one ``--sign-key ./key.pem`` away.
 
-    Symlinks are resolved on both sides before comparing: a link inside the
-    workspace pointing at a key outside it is still readable from inside.
+    Both sides are resolved before comparing, so the check follows the file
+    rather than the path used to name it, and a key that really sits inside the
+    workspace is caught however it was reached. A symlink inside the workspace
+    pointing at a key outside it is not caught, and does not need to be: the
+    sandbox resolves that link in its own mount namespace, where the target
+    path does not exist, so the bytes never become readable.
 
     Deliberately conservative. A key under ``runs/`` is in fact masked from the
     sandbox, and is still refused, because the exact shape of the mask is not
