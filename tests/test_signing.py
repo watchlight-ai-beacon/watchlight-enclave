@@ -364,9 +364,10 @@ def test_a_key_inside_the_mounted_workspace_is_refused(tmp_path):
     assert signing.exposed_by(key, [workspace]) == workspace.resolve()
 
 
-def test_a_symlink_from_inside_the_workspace_is_also_refused(tmp_path):
-    # Resolving only one side would miss this: the file lives outside, and the
-    # path the sandbox can open is inside.
+def test_a_symlink_pointing_out_of_the_workspace_is_not_exposure(tmp_path):
+    # Both sides are resolved, so this direction is safe: the sandbox resolves
+    # the link in its own namespace, where the target does not exist. What must
+    # be caught is the key itself sitting inside, which the second case covers.
     workspace = tmp_path / "project"
     workspace.mkdir()
     real = tmp_path / "outside.key"
