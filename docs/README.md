@@ -191,11 +191,14 @@ wl-enclave: egress   attested: the guard was the sandbox's only route
 wl-enclave:          records cover http_connect only; other traffic was blocked, not recorded
 wl-enclave: controls 10/10 in force
 wl-enclave: governed by sha256:c63334f542a4b405f6f8099cc7889c801d0b5969c5d4cfd0359915d15c5e627f
-wl-enclave: OK — 11 records, chain intact, unsigned
+wl-enclave: OK — 11 records, chain intact, self-signed
 ```
 
-No account, no network, not even Watchlight. The bundle holds these kinds of
-record, because no one layer can answer for the others:
+No account, no network, not even Watchlight. (`self-signed` is what you get
+before you pin a key — see [Signing](#signing) below. Run `wl-enclave keygen`
+once and runs seal signed bundles from then on; without a key they seal
+unsigned and `verify` still works.) The bundle holds these kinds of record,
+because no one layer can answer for the others:
 
 | Record | What it tells you |
 |---|---|
@@ -288,24 +291,54 @@ The proxy variables were then advice it could ignore, and the egress records are
 a lower bound rather than an account. `verify` says so plainly, because a bundle
 that is quietly incomplete is worse than one that admits the gap.
 
-**It's unsigned.** The chain catches edits and corruption. It does not prove who
-produced it: anyone who can edit the file can also recompute the chain over
-their edit, and `verify` says so rather than letting you assume otherwise.
+### Signing
 
-Hash chaining also does not stop **truncation**. Drop records off the end and
-what remains is a shorter, perfectly valid chain — which is why `verify`
-reports what the bundle says about its own gaps (`records_dropped`, a guard
-that stopped early, a control it could not confirm) rather than only checking
-hashes. A signature over the sealed manifest is what closes truncation
-properly, and that key belongs somewhere neither the agent nor the project
-directory can reach. Signing is not implemented yet; `verify` says `unsigned`
-on every bundle today, and the design is tracked in the repository's issues.
+The chain catches edits: anyone who changes a record breaks every hash after
+it. On its own it does not say *who produced the bundle*, and it does not stop
+**truncation** — drop records off the end and what remains is a shorter,
+perfectly valid chain.
+
+Run `wl-enclave keygen` once. It writes an Ed25519 key to
+`~/.config/wl-enclave/signing.key` at mode 0600 — outside your repository, so
+it cannot be committed, and outside the bundle, so it cannot travel with the
+evidence it signs — and prints a key id. Runs seal a signed manifest from then
+on. Point `--sign-key` or `$WL_ENCLAVE_SIGNING_KEY` somewhere else if you keep
+keys elsewhere; a path you name explicitly and that does not exist is an error
+rather than a quiet unsigned seal.
+
+Then give reviewers the key id, because `verify` grades the claim in three
+steps and only the last one says anything about *who*:
+
+| What `verify` prints | What it establishes |
+|---|---|
+| `unsigned` | the chain is internally consistent. Nothing about who produced it. |
+| `self-signed` | the manifest is unchanged since it was sealed. The public key travels inside the bundle, so *anyone* can produce a bundle in this state. |
+| `signed by the expected key` | the holder of the one key you passed to `--signer` sealed this manifest. |
+
+```bash
+wl-enclave verify runs/<id>/bundle --signer sha256:64b002a4…   # pin the key
+wl-enclave verify runs/<id>/bundle --require-signature         # any key, but one
+```
+
+`--require-signature` reads an unsigned bundle as `incomplete` rather than
+`failed`: everything in it is still true, and what is missing is attribution.
+A wrong key is `failed`, because that is a contradiction rather than a gap.
+Either way the exit status is non-zero, which is what a CI gate needs.
+
+**What signing still does not buy you.** A key holder can truncate the chain,
+write a `run.close` whose counts agree with what is left, re-seal, and the
+result verifies as `ok` against a pinned key with a denial missing. Closing
+that needs a cosignature from a witness the signer does not run; manifests
+carry an empty `cosignatures` list today so adding one later does not change
+the format. So read a signature as *this is the bundle that key sealed,
+unaltered* — not as *this is everything that happened*.
 
 ## Day-to-day
 
 | Command | What it's for |
 |---|---|
 | `wl-enclave ps` | every run, newest first, with whether its bundle still verifies |
+| `wl-enclave hosts [--since DATE]` | every host reached across runs, from verified bundles only — runs whose bundles fail are excluded *and* counted, and the exit status is non-zero when the table is not both trustworthy and complete |
 | `wl-enclave logs <run>` | what the agent printed |
 | `wl-enclave quarantine <run>` | kill it now, and seal the evidence that already exists |
 | `wl-enclave evidence export --run <run>` | archive a bundle; refuses if it doesn't verify |

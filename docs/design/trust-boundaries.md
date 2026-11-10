@@ -100,17 +100,23 @@ writing `{"event": "sandbox.attested", ...}` gets a `decision` record, because
 The host process is trusted. It writes the chain, holds the records, seals the
 bundle.
 
-Which means: **a bundle currently proves things about the agent, not about the
-operator.** And while it's unsigned, it doesn't strictly prove anything about
-either, since whoever can edit the chain can recompute it.
-
-This is the boundary most worth moving, and it's worth being precise about the
-two different things signing could buy:
+Which means: **a bundle proves things about the agent, not about the
+operator.** Signing moved that boundary partway and it is worth being precise
+about how far, because the two things signing could buy are different problems:
 
 - Signing with a key the operator holds makes a bundle evidence *against the
-  agent*. That's issues #2–#4.
-- Making it evidence against the *operator* requires a key the operator can't
-  wield alone. Different problem, and the output should never blur the two.
+  agent*. **This is shipped.** It means someone who can write the file but
+  can't use the key cannot forge a bundle that verifies — the attacker shrinks
+  from "anyone with filesystem access" to "the key holder".
+- Making it evidence against the *operator* needs a key the operator cannot
+  wield alone. **Not shipped, and nothing in the output pretends otherwise.**
+  The key holder can still truncate and re-seal, so an operator signing their
+  own bundles is attesting, not proving. `verify` prints `self-signed` when
+  nobody pinned a key precisely so this does not read as the stronger claim.
+
+The second one is a witness cosignature, and the slot for it exists in every
+manifest already (`cosignatures: []`, checked by the verifier even though
+nothing writes it yet) so adding one does not move the format version.
 
 The guard is already a separate trust domain — own container, own network, own
 directory — but not yet a separate *signer*, so in principle the host could

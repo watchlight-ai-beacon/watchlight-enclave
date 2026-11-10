@@ -43,3 +43,11 @@ path = "tests/test_forgery_resistance.py"
 fingerprint = "841fab9e21b48e66dafad676b7f1b3de:0"
 issue = "#1"
 reason = "Test code, and the non-static argv is the point of the test. It invokes this project's own CLI end to end to prove a sandboxed agent cannot see its own run directory; the two non-literal elements are the venv path derived from __file__ and a temporary project directory the test itself creates under the home directory, which the container runtime requires because only the home directory is shared into a VM-backed daemon. Nothing attacker-controlled reaches the argv. Asserting this property against a real runtime is the only way to test it: a mocked version would assert that the code agrees with itself, which is the failure mode being guarded against. Full review in #1. Fingerprint moved when the call stopped invoking a hardcoded .venv path and started using sys.executable, which is the fix for a test that could only ever have passed on a developer machine. Same call, same reviewed judgement."
+
+[[finding]]
+tool = "opengrep"
+rule = "community.python.lang.security.audit.insecure-file-permissions"
+path = "src/wl_enclave/signing.py"
+fingerprint = "90c0e56411fb55e6838447e0e0c97070:0"
+issue = "#1"
+reason = "False positive from a file-oriented heuristic applied to a directory. The rule calls 0o700 'widely permissive' and recommends 0o644 as a good default; for the directory that holds the Ed25519 signing key, 0o644 would be strictly worse on both counts — world-readable, and not traversable by its owner, so the key could not be opened at all. 0o700 is owner-only and is the tightest mode that still works. The chmod is deliberate rather than redundant: mkdir's mode argument does nothing when the directory already exists, which is the case that leaves a pre-existing ~/.config/wl-enclave at the umask default of 0755. The key file itself is created at 0o600 via os.open before any bytes are written. Both modes are asserted by tests (test_a_new_key_is_not_readable_by_anyone_else, test_the_key_directory_is_not_readable_by_other_users). Full review in #1."
