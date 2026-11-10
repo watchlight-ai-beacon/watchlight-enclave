@@ -66,7 +66,9 @@ Everything lives in the repository: the quickstart, what a bundle proves, the
 trust boundaries, the control vocabulary, egress coverage, and how to write a
 driver for a new sandbox.
 
-**https://github.com/watchlight-ai-beacon/watchlight-enclave**
+**Documentation: https://docs.watchlight.ai/enclave**
+
+**Source: https://github.com/watchlight-ai-beacon/watchlight-enclave**
 
 - [Quickstart](https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/docs/README.md)
 - [What a bundle proves, and what it does not](https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/docs/design/evidence.md)
