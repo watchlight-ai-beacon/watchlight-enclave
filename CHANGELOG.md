@@ -32,10 +32,6 @@ would mean breaking that promise immediately.
 
 ## [Unreleased]
 
-Nothing yet.
-
-## [Unreleased]
-
 ### Fixed
 
 - **The sandbox is attested before the agent runs, not alongside it**
