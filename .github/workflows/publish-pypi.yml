@@ -156,13 +156,18 @@ jobs:
           python - <<'PY'
           import sys, tarfile, zipfile, pathlib, re
 
-          # Names that must never appear inside a distribution. `runs/` carries
-          # evidence bundles from real runs; `.env`/`.venv` carry local state.
+          # Credential material and private state only. An earlier version of
+          # this list also matched `.shoalscan`, which failed the 0.2.0
+          # candidate over a committed scanner baseline — noise in an sdist is
+          # a packaging question, settled by the sdist whitelist in
+          # pyproject.toml, not a reason to refuse to publish. This gate is for
+          # the thing that cannot be walked back: a private key, or a run's
+          # evidence, on an immutable index.
           BAD = re.compile(
               r"(^|/)("
               r".*\.pem|.*\.key|.*\.p12|.*\.pfx|id_[a-z0-9]+|"
               r"\.env|\.envrc|\.netrc|"
-              r"runs|\.venv|\.shoalscan"
+              r"runs|\.venv"
               r")(/|$)"
           )
 

@@ -28,3 +28,28 @@ wl-enclave = "wl_enclave.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wl_enclave"]
+
+[tool.hatch.build.targets.sdist]
+# A whitelist, not an exclude list. hatchling's default sdist is the whole
+# working tree minus VCS ignores, which put .github/, .gitignore and the
+# shoalscan baseline into the 0.2.0 candidate. The risk is not those files —
+# it is that the default is open, so anything added to the repository later
+# ships by default and nobody finds out until it is on an immutable index.
+#
+# tests/ is in deliberately. The package's claim is that a third party can
+# check a bundle without trusting us, and the forgery tests are how they check
+# that the verifier refuses what it says it refuses. crates/ is in for the same
+# reason: the guard is where record-before-forward lives, so its source
+# belongs with the distribution that claims it.
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/examples",
+  "/crates",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/pyproject.toml",
+]
