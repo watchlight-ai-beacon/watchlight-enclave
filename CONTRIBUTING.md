@@ -94,7 +94,14 @@ gone** — and if you make it pass reliably, make sure you fixed the ordering
 rather than the assertion.
 
 [#22]: https://github.com/watchlight-ai-beacon/watchlight-enclave/issues/22
- Beyond that, the questions a reviewer will actually ask:
+
+Every pull request needs an approving review before it merges, and `main` takes
+no direct pushes. Approvals are dismissed when new commits land, so a review is
+of the code that actually merges rather than of an earlier draft. Maintainers
+can bypass this to land their own work; that is a deliberate exception for a
+small team, not the normal path, and it does not extend to the status checks.
+
+Beyond that, the questions a reviewer will actually ask:
 
 **Does a bundle still state its own limits?** A new field that could be absent,
 a new control that could be unverified, a new way a record could be dropped —
@@ -115,10 +122,21 @@ the CHANGELOG, in those words.
 ## Reporting a weakness in the evidence model
 
 If you can make a bundle understate what happened, that is the most valuable
-bug report this project can receive. Open an issue with the reproduction. A
-`SECURITY.md` with a private disclosure route is coming; until then, if you
-would rather not post it publicly, mail security@watchlight.ai.
+bug report this project can receive — and it goes through
+[`SECURITY.md`](SECURITY.md), privately, not into a public issue.
+[Report a vulnerability](https://github.com/watchlight-ai-beacon/watchlight-enclave/security/advisories/new)
+on the Security tab, or mail security@watchlight.ai.
+
+That policy also lists what we already know and are not looking for reports
+about — chiefly that a holder of the signing key can re-seal a truncated chain
+— so you can tell quickly whether you have found something new.
 
 Attestation gaps are fair game too: a control that claims more than it
 established, a readback that reads back the thing we asked for, a probe that
 cannot tell "the control held" from "we could not observe anything".
+
+## Code of conduct
+
+By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
+Concerns go to conduct@watchlight.ai, which is read by people who can act on
+them.
