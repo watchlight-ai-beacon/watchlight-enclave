@@ -113,10 +113,10 @@ wrote it.
 **One rule governs the whole design: a bundle must never be able to understate
 what happened.** A bundle that quietly drops records while still looking
 complete is worse than one that admits a gap, because the first invites a
-reviewer to sign off and the second sends them to ask a question. Every
-tradeoff below falls out of that.
+reviewer to sign off and the second sends them to ask a question. Everything
+below follows from that.
 
-## Two layers, and why you need both
+## Two layers
 
 **The sandbox** decides where the agent may connect. An internal Docker network
 with no route out, and an egress guard that is the only way through.
@@ -126,9 +126,9 @@ what authority the agent has — which tools, on which resources, under whose
 policy. Standard [Cedar](https://www.cedarpolicy.com/), so the policy is
 readable and the decisions are deterministic.
 
-Neither substitutes for the other. Watchlight knows the agent *asked to wire
-money*. The guard knows it *tried to reach pastebin.com*. You can't derive
-either from the other, and a bundle carries both.
+One doesn't replace the other. Watchlight knows the agent *asked to wire
+money*. The guard knows it *tried to reach pastebin.com*. Neither fact gets you
+the other one, and a bundle carries both.
 
 ## How it fits together
 
@@ -182,50 +182,50 @@ convenience for the agent, not a control — an agent that ignores them finds no
 route rather than a bypass. If the route were the convenience and the variables
 the control, an agent could simply not read them.
 
-## What the bundle rests on
+## Why you can trust it
 
-A bundle is only as good as the mechanism under each of its claims. These are
-the five it rests on, stated plainly enough to check against the code.
+Five things make a bundle worth more than a log file. Each one is small enough
+that you can go and check it in the code.
 
-- **Both halves of the story, in one chain.** The authority decision and the
-  network attempt are recorded by different components with different vantage
-  points, then hashed into one ordered stream. Holding them in separate systems
-  loses exactly what you most want to ask about. (The chain orders them; it
-  does not yet carry a key tying a specific connection to a specific tool call.
-  If you need that join, say so on the tracker — it is a schema addition, not a
-  redesign.)
+- **Both halves of the story, in one chain.** Two components see two different
+  things: what the agent was allowed to do, and what it tried to reach. Both
+  get hashed into a single ordered stream. Keep them in separate systems and
+  you lose the ability to read one against the other, which is usually the
+  whole question. (The chain puts them in order. It does not yet carry a key
+  linking one connection to one tool call — if you need that, ask on the
+  tracker. It is a new field, not a redesign.)
 
-- **The policy engine runs in the agent's own process.** A decision is a
-  function call, not a round-trip to a service, so recording every decision the
-  agent reports costs nothing and none are sampled away. What the agent does
-  *not* report is the real limit, and the next section is blunt about it.
+- **The policy engine runs inside the agent.** Asking it a question is a
+  function call, not a network hop, so every decision gets recorded and none
+  get sampled away to keep costs down. The catch is what the agent never asks
+  about at all, which the next section is blunt about.
 
-- **Allowed connections are evidence, not just denials.** Recording only blocked
-  attempts answers "what did we stop" and leaves "what did it actually reach"
-  to inference. Both verdicts are recorded, with host, port, and bytes each way.
+- **It records what got through, not just what got blocked.** A log of blocked
+  attempts tells you what you stopped. It leaves you guessing about what
+  actually went out of the door. You get both, with the host, the port and the
+  bytes each way.
 
-- **The guard records before it forwards, and refuses to forward if it cannot
-  record.** Recording is a precondition for the connection, not a side-effect.
-  A guard that loses its record file stops being a route rather than becoming a
-  silent one.
+- **The guard writes the record first, then forwards.** If it cannot write, it
+  does not forward. So a guard that loses its record file goes dead instead of
+  going quiet, and you find out immediately.
 
-- **Four verdicts, not two.** `failed` means the chain is broken — don't trust
-  the file. `uncontained` means the chain is intact and isolation slipped —
-  trust it and act on it. `incomplete` means everything here is true and
-  something may be missing. Only `ok` exits 0. A verifier that can't tell "this
-  file is lying" from "this file is honest about a gap" leaves the reviewer to
-  guess which they hold.
+- **Four answers, not two.** `failed`: the chain is broken, so don't trust the
+  file. `uncontained`: the chain is fine but isolation slipped, so trust it and
+  go deal with it. `incomplete`: everything here is true, but something might
+  be missing. `ok`: and only `ok` exits 0. "This file is lying" and "this file
+  is honest about a gap" are very different problems, and you shouldn't have to
+  guess which one you are holding.
 
-Two more properties, covered properly in
-[`docs/design/evidence.md`](docs/design/evidence.md): the same `policy:` bundle
-feeds both layers and its hash is recorded, so two runs held to different rules
-cannot read as two runs held to the same rules; and each attested control says
-*how* its state was established, because "configured" and "confirmed in force"
-are different claims.
+Two more, if you want the detail —
+[`docs/design/evidence.md`](docs/design/evidence.md) covers both. The same
+`policy:` file feeds both layers and its hash goes into the bundle, so two runs
+held to different rules can't end up looking like two runs held to the same
+rules. And every control says *how* we know it was on, because "we configured
+it" and "we checked it" are not the same claim.
 
-## What it does not do yet
+## What it can't do yet
 
-Worth knowing before you build on it.
+Read this before you build on it.
 
 **A signature is not a completeness proof.** The hash chain catches *edits*.
 The signed manifest pins the head and the count, which catches *truncation by
@@ -233,11 +233,12 @@ someone without the key*. It does not stop the key holder: truncate the chain,
 write a `run.close` whose counts agree with what is left, re-seal, and the
 bundle verifies as `ok` against a pinned key with a denial missing from it.
 
-A test performs exactly that forgery and asserts it *succeeds*
-(`test_a_key_holder_can_still_reseal_a_truncated_chain`), so the limit cannot
-quietly become a claim we don't have. Closing it needs a cosignature from a
-witness the signer does not run, which is why every manifest already carries an
-empty `cosignatures` list — adding one later does not change the bundle format.
+That is a real hole. There is a test that performs the forgery and asserts it
+**works** (`test_a_key_holder_can_still_reseal_a_truncated_chain`), so this
+limit can't quietly turn into a claim we don't have. Closing it takes a
+countersignature from a witness the signer doesn't run, which is why every
+manifest already carries an empty `cosignatures` list: adding one later won't
+change the bundle format.
 [#2–#6](https://github.com/watchlight-ai-beacon/watchlight-enclave/issues).
 
 So a signature means *this bundle is the one that key sealed, unaltered since* —
@@ -246,8 +247,8 @@ difference.
 
 **Traffic the topology blocks isn't recorded.** A raw socket to port 9999 has
 no route, so it fails — but the guard never sees it, so there's no line in your
-bundle. Blocked, not described, and the bundle states this about itself in
-`blocked_not_recorded` rather than leaving you to find out.
+bundle. Blocked, but not written down — and the bundle admits that in
+`blocked_not_recorded` instead of letting you assume otherwise.
 [#12](https://github.com/watchlight-ai-beacon/watchlight-enclave/issues/12).
 
 **Decision records are cooperative.** The SDK is a library the agent calls. An
@@ -256,8 +257,9 @@ tell you whether that means "made no decisions" or "went around the SDK". The
 egress records don't have this problem, because the agent can't route around
 the network topology. Don't read the two streams as equally strong.
 
-**The workspace is writable**, so a run can edit the rules the *next* run is
-held to. We make that visible with digests rather than preventing it.
+**The workspace is writable**, so a run can edit the rules the *next* run gets
+held to. We don't prevent that. We make it visible, by recording a hash of the
+rules each run actually ran under.
 [#13](https://github.com/watchlight-ai-beacon/watchlight-enclave/issues/13).
 
 ## Repository layout
@@ -272,7 +274,7 @@ held to. We make that visible with digests rather than preventing it.
 | `docs/design/` | design notes — what a bundle proves, trust boundaries, the control vocabulary, egress coverage, writing a driver |
 | `examples/` | runnable agents with policies |
 
-## The other half: Watchlight Developer Edition
+## The other half: Watchlight
 
 Enclave is the runtime. The authority layer it records is
 **[Watchlight Developer Edition](https://github.com/watchlight-ai-beacon/watchlight-de)**
@@ -285,7 +287,7 @@ involved, and Enclave produces bundles with an empty decision stream if you
 never call the SDK. The same `policy:` bundle feeds both, which is why they are
 better together.
 
-## Open source, and the license
+## What's open, and what isn't
 
 Everything in this repository is **open and Apache-2.0** — the `wl-enclave`
 CLI, the `enclave.yaml` schema, the `RuntimeDriver` protocol and every runtime
