@@ -32,6 +32,25 @@ would mean breaking that promise immediately.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] — 2026-11-10
+
+**Two fixes to what a bundle says about itself, one of which changes the
+verdict on bundles you already hold.** Of the three contracts this project
+versions separately, this release moves one: how strictly `verify` reads a
+bundle. The CLI surface and `enclave.yaml` are unchanged, and the bundle format
+is still `wl-enclave-evidence/1` — no new record types, no new fields.
+
+Upgrade with care if you gate CI on `wl-enclave verify`. A run that was stopped
+— by its timeout or by an operator — used to verify `ok`, and now verifies
+`incomplete` and exits 1. That is a gate that will start failing, on runs where
+it should have been failing all along.
+
+Driver authors: `RuntimeDriver` gained `release()`, and `wait()` and `logs()`
+now describe the agent rather than the container. An out-of-tree driver needs
+updating; `docs/design/drivers.md` says what and why.
+
 ### Fixed
 
 - **⚠️ `verify` is stricter: a run that was stopped no longer verifies as `ok`**
