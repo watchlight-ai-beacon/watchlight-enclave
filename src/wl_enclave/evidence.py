@@ -410,11 +410,22 @@ class VerifyResult:
         return f"OK — {self.records} records, chain intact, {note}"
 
 
-#: A run ends with exactly one of these, and which one changes the reading:
-#: ``run.close`` completed, ``run.contained`` was stopped by an operator, and
-#: ``run.error`` failed before it was under way. A chain with none of them is
-#: missing its end, which is indistinguishable from having been truncated.
-_TERMINAL_RECORDS = frozenset({"run.close", "run.contained", "run.error"})
+#: How a run finishes under its own steam: ``run.close`` completed and
+#: ``run.error`` failed before it was under way. Exactly one, and it is the last
+#: record, because anything after it would describe a run that had already ended.
+_ENDING_RECORDS = frozenset({"run.close", "run.error"})
+
+#: ``run.contained`` says the run was stopped — by its timeout, or by an
+#: operator reaching for ``kill``. It is not an ending, because a stopped run
+#: still closes: the timeout path contains the sandbox and then seals with
+#: ``run.close`` and its tallies. It *may* be the last record, when whatever
+#: would have closed the chain never got to, and that is why a chain ending here
+#: is not treated as missing its end.
+#:
+#: Both sets together are what "says how the run ended" means. A chain with
+#: nothing from either is missing its end, which is indistinguishable from
+#: having been truncated.
+_TERMINAL_RECORDS = _ENDING_RECORDS | frozenset({"run.contained"})
 
 #: ``run.close`` field -> the record type it counts. Only fields that count
 #: chain records one-for-one appear here; a derived total (``egress_allowed``,
@@ -769,25 +780,60 @@ def verify(
     # A run ends exactly once, and says so. Without this a bundle holding only
     # run.open verifies as OK, and a run that died before it had a sandbox
     # produces a shorter, cleaner bundle than one that completed.
-    terminals = [r for r in records if r.type in _TERMINAL_RECORDS]
-    if not terminals:
+    #
+    # Counting every terminal record as an ending was wrong in both directions.
+    # A timed-out run records run.contained and then seals with run.close, which
+    # read as two endings and FAILED a bundle that was in fact sound. And a run
+    # killed by an operator, whose chain ends at run.contained because nothing
+    # closed it, read as a single clean ending and verified OK — the same
+    # verdict as a run that finished. The second is the one that mattered: it
+    # let a bundle understate what happened.
+    endings = [r for r in records if r.type in _ENDING_RECORDS]
+    contained = [r for r in records if r.type == "run.contained"]
+    if not endings and not contained:
         problems.append(
             f"{CHAIN_FILE}: no {' / '.join(sorted(_TERMINAL_RECORDS))} record; "
             f"the chain does not say how the run ended, so records may be "
             f"missing from the end"
         )
-    elif len(terminals) > 1:
+    elif len(endings) > 1:
         problems.append(
-            f"{CHAIN_FILE}: {len(terminals)} terminal records, but a run ends "
-            f"once: " + ", ".join(f"{r.type}@{r.seq}" for r in terminals)
+            f"{CHAIN_FILE}: {len(endings)} records end the run, but a run ends "
+            f"once: " + ", ".join(f"{r.type}@{r.seq}" for r in endings)
         )
-    elif terminals[0].type == "run.error":
+    elif endings and endings[0].seq != records[-1].seq:
+        # An ending that is not last means records describe a run that had
+        # already finished. Truncation is caught by the manifest's head and
+        # count; this catches the opposite, something appended after the end.
+        problems.append(
+            f"{CHAIN_FILE}: {endings[0].type}@{endings[0].seq} ends the run but "
+            f"{len(records) - 1 - records.index(endings[0])} record(s) follow it"
+        )
+
+    if contained:
+        # Stopped, not completed. Whatever the agent had not done when it was
+        # stopped is absent from this bundle, and absent is not clean. Reported
+        # for every contained run, however the chain ends, because the operator
+        # reading the verdict is the one who needs to know the run did not
+        # finish — and because the alternative is a killed run verifying
+        # identically to one that ran to completion.
+        first = contained[0]
+        reason = first.data.get("reason") or "unknown reason"
+        detail = first.data.get("limit") or first.data.get("command") or ""
+        incomplete_reasons.append(
+            f"the run was stopped before it finished "
+            f"({reason}{': ' + str(detail) if detail else ''}); whatever had "
+            f"not happened yet is absent rather than clean"
+        )
+
+    errored = [r for r in endings if r.type == "run.error"]
+    if errored:
         # Sealed deliberately, so not an integrity failure — but a run that
         # failed before it was under way never attested anything, and the
         # absence of those records is not evidence of a clean run.
         incomplete_reasons.append(
             f"the run ended in error before completing "
-            f"({terminals[0].data.get('message') or 'no message'}); whatever "
+            f"({errored[0].data.get('message') or 'no message'}); whatever "
             f"had not happened yet is absent rather than clean"
         )
 

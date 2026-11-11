@@ -883,7 +883,11 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             detail = (entry.get("detail") or "").strip()
             _say(f"         - {name}: {state}" + (f" — {detail}" if detail else ""))
     if not result.complete:
-        _say("egress   INCOMPLETE — by the bundle's own account:")
+        # Unlabelled, like the verdict line below it. The "egress" label this
+        # carried was copied from the block above and was never true: these
+        # reasons are about the run, and most of them have nothing to do with
+        # egress. It showed on any incomplete bundle.
+        _say("INCOMPLETE — by the bundle's own account:")
         for reason in result.incomplete_reasons:
             _say(f"         - {reason}")
     for problem in result.problems:
