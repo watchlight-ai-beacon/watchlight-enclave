@@ -14,6 +14,14 @@ runs/<id>/
   bundle/     ← the host writes here      never mounted into the sandbox
 ```
 
+`policies/` is bound read-only a second time, at the place `/work` exposes it.
+The read-only bind at `/policy` was never enough on its own: both paths reach
+the same inodes, and the workspace one was writable, so an agent could rewrite
+the rules it was being judged by. Reads still work, and have to — the SDK loads
+these files to make its decisions, so hiding them would stop governance working
+at all. A probe from inside the sandbox confirms both halves, and the run
+records the result as `policy_read_only_in_sandbox`.
+
 `evidence/` *has* to be writable by the agent, because the Watchlight SDK runs
 inside the sandbox and that's where it writes decisions. Everything in the
 "records we don't trust" section below follows from that one unavoidable fact.
@@ -137,6 +145,15 @@ If `wl-enclave` itself is running as root, we fall back to uid 65532 rather
 than handing the container uid 0 — but then bind-mount ownership is something
 whoever set that up needs to think about.
 
-**`/work/policies` and `/policy` are the same inodes**, and the first is
-writable. We take the governing digest once, at open, so tampering *within* a
-run isn't visible yet — only tampering that affects the next run. Issue #18.
+**The seal stops the sandbox, not the host.** `/work/policies` is bound
+read-only on top of the writable workspace, so the agent can't change the rules
+it's being judged by. Nothing about that constrains the host: an operator, or
+any other process on your machine, can still edit those files while a run is in
+flight. That's why the digests are taken at both ends — the seal is what
+prevents the case we can prevent, and the two readings are what report the case
+we can't.
+
+**A policy bundle that *is* the workspace root isn't sealed.** Sealing it would
+make the whole workspace read-only and leave the agent unable to write code, so
+the writable mount stands and only the two readings report a change. Put your
+policies in a subdirectory.

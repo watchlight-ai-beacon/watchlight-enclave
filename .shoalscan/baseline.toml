@@ -75,3 +75,11 @@ path = "tests/test_attestation_precedes_the_agent.py"
 fingerprint = "54eca3e50a310a03b9cc3493887245d4:0"
 issue = "#22"
 reason = "False positive on an exception type. The rule matches subprocess.TimeoutExpired, which starts no process: it is raised by the fake agent process to drive the timeout path, where wait() must return None and leave the pipe undrained so the output survives the quarantine that follows. Recorded for the same reason as the CompletedProcess match above. Reviewed with #22."
+
+[[finding]]
+tool = "opengrep"
+rule = "community.python.lang.security.audit.dangerous-subprocess-use-audit"
+path = "tests/test_the_agent_cannot_change_its_rules.py"
+fingerprint = "daf8ba028ab965b10a8845ac00804601:0"
+issue = "#18"
+reason = "False positive on a result type, same as the two entries above. The rule matches subprocess.CompletedProcess, which starts no process: it is the object subprocess.run returns, constructed here by a fake docker CLI whose scripted exit codes drive the read and write probes. Using a fake is the point — the control asserts that a sealed path refuses a write, and an exit code is the only thing the driver reads, so the probe logic is tested without a container runtime. Reviewed with #18."

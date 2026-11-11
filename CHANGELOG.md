@@ -34,6 +34,27 @@ would mean breaking that promise immediately.
 
 ### Fixed
 
+- **An agent can no longer change the rules it is being judged by.** The policy
+  bundle is bound read-only a second time, at the location `/work` exposes it.
+  `/policy` was already read-only and that was never enough: both paths reach
+  the same inodes, and the workspace one was writable, so the read-only bind
+  covered a path while the files behind it stayed writable through the other.
+
+  Reads are unaffected, and that is deliberate — the SDK inside the sandbox
+  loads these files to make its decisions, so a change that hid them would stop
+  governance working at all. Creating, editing and deleting are refused by the
+  kernel.
+
+  A probe from inside the sandbox checks both halves — that the files are
+  readable, and that a write is refused — and the run records the result as the
+  `policy_read_only_in_sandbox` control. An image too small to run the probe
+  reports the control as unconfirmed rather than in force.
+
+  The seal constrains the sandbox, not the host: an operator can still edit
+  those files mid-run, which is what the two readings below report. A policy
+  bundle that *is* the workspace root is not sealed, because that would leave
+  the agent unable to write anything.
+
 - **`verify` now reports when a run rewrote the rules it was being judged by.**
   ⚠️ **This changes the verdict on affected bundles**, and is the second
   `verify` strictness change in a row — see the note under 0.3.0.

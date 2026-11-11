@@ -177,12 +177,12 @@ records are then a lower bound rather than a complete account.
 *problem*, not an incompleteness — the bundle isn't reporting a gap it knows
 about, it's making two statements that can't both be true.
 
-**The rule files get read twice.** `/policy` is bound read-only, and it's the
-same inodes as `/work/policies`, which is writable because an agent that can't
-write code can't do the job. Nothing masks it. So a run can rewrite the rules
-it's being judged by, and a digest taken only at the start would go on
-describing rules that stopped applying halfway through — the mechanism built to
-make rule-tampering visible, blind to tampering inside its own run.
+**The rule files get read twice.** They're also sealed read-only where the
+workspace exposes them, which is the primary defence and is described in
+[the sandbox](./sandbox.md). Reading them twice is what remains useful once
+writes are refused: it's how a bundle shows the seal actually held, rather than
+asking a reader to trust that it was configured. If a mount is ever
+misconfigured, the two readings are what notice.
 
 So `config.attested` is what governed the start and `config.reattested` is what
 governed the end. Two readings that disagree are a *problem*, for the same

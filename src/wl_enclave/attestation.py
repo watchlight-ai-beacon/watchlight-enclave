@@ -53,6 +53,7 @@ __all__ = [
     "NO_NEW_PRIVILEGES",
     "RUNS_AS_NON_ROOT",
     "EVIDENCE_MASKED",
+    "POLICY_READ_ONLY",
     "control",
     "merge",
     "unverified_controls",
@@ -98,6 +99,11 @@ CAPABILITIES_DROPPED = "capabilities_dropped"
 NO_NEW_PRIVILEGES = "no_new_privileges"
 RUNS_AS_NON_ROOT = "runs_as_non_root"
 EVIDENCE_MASKED = "evidence_masked_from_sandbox"
+#: The rules are readable from inside the sandbox and cannot be changed there.
+#: Both halves matter: the SDK loads these files to make its decisions, so a
+#: control that hid them would report success on a run that could not be
+#: governed at all.
+POLICY_READ_ONLY = "policy_read_only_in_sandbox"
 
 
 def control(
@@ -139,6 +145,7 @@ _CLAIM = {
     NO_NEW_PRIVILEGES: CONTAINMENT,
     RUNS_AS_NON_ROOT: CONTAINMENT,
     EVIDENCE_MASKED: CONTAINMENT,
+    POLICY_READ_ONLY: CONTAINMENT,
     GUARD_ATTACHED: WITNESSING,
     GUARD_HAS_EGRESS: WITNESSING,
     GUARD_LIVE: WITNESSING,
