@@ -48,6 +48,34 @@ def _fail(msg: str, hint: Optional[str] = None) -> int:
 
 
 # ----------------------------------------------------------------- seal ----
+def _attest_governing_files_again(chain: evidence.ChainWriter, cfg) -> None:
+    """Re-read the rule files at the end of a run and record what they are now.
+
+    ``/policy`` is bound read-only, but it is the same inodes as
+    ``/work/policies``, which is writable because an agent that cannot write
+    code cannot do the job. Nothing masks it, so a run can rewrite the rules it
+    is itself being held to, and a digest taken once at the start would go on
+    describing rules that stopped applying halfway through.
+
+    Reading them again is what lets ``verify`` tell the two cases apart. It
+    carries only the digests: the rest of the opening record is held in memory
+    and was not re-read, and stating an unchanged in-memory value beside a
+    freshly read one would invite a reviewer to believe both were checked.
+
+    The honest limit is that this compares two points and not the interval
+    between them. A run that edits a rule file, acts under it and puts the
+    original back leaves two digests that agree.
+
+    Written under its own record type rather than as a second config.attested.
+    A verifier that predates this reading ignores a type it does not know, so
+    it goes on reporting the opening digest as what governed the run. Reusing
+    the existing type would instead have left it reading the *last* such record
+    — handing it the digest of the rules the agent rewrote, as the authoritative
+    answer to what the run was governed by.
+    """
+    chain.append("config.reattested", {"digests": cfg.governing_digests()})
+
+
 def _seal(
     chain: evidence.ChainWriter,
     signer: Optional[signing.Signer],
@@ -282,6 +310,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # writable, so a run can edit the rules its successor will be held to;
     # recording the bytes means the next bundle cannot silently claim the same
     # rules as this one.
+    #
+    # Read again at the end, as config.reattested, because the policy directory
+    # lives inside the writable workspace: the read-only bind at /policy covers
+    # the path, not the files behind it. This record describes the rules the
+    # run started under.
     chain.append(
         "config.attested",
         {
@@ -516,6 +549,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         denies = sum(1 for d in decisions if d.get("decision") == "Deny")
         holds = sum(1 for d in decisions if d.get("decision") == "NeedsApproval")
 
+        _attest_governing_files_again(chain, cfg)
         chain.append(
             "run.close",
             {
@@ -573,6 +607,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 0 if (status == 0 and not timed_out) else 1
 
     except DriverError as exc:
+        # The sandbox may have been up, so the rules may have moved under it.
+        _attest_governing_files_again(chain, cfg)
         chain.append("run.error", {"error": str(exc)})
         _seal(chain, signer, run.id, cfg.agent.name, cfg.runtime)
         return _fail(str(exc))

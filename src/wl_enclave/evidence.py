@@ -413,6 +413,37 @@ class VerifyResult:
 #: How a run finishes under its own steam: ``run.close`` completed and
 #: ``run.error`` failed before it was under way. Exactly one, and it is the last
 #: record, because anything after it would describe a run that had already ended.
+#: The rule files are read at both ends of a run and recorded separately.
+#: ``config.reattested`` is its own type so that a verifier predating it skips
+#: a record it does not recognise, rather than reading the closing digest as
+#: the answer to what governed the run.
+_GOVERNING_RECORDS = frozenset({"config.attested", "config.reattested"})
+
+
+def _rules_that_moved(opened: dict, closed: dict) -> list[str]:
+    """Name the governing files that differ between the two readings.
+
+    A combined digest is enough to know something moved, and useless for doing
+    anything about it. The per-file comparison tells a reviewer whether a
+    policy was rewritten or merely added, which is the difference between a run
+    that widened its own authority and one that was handed another rule.
+    """
+    before = opened.get("files") or {}
+    after = closed.get("files") or {}
+    moved = []
+    for name in sorted(set(before) | set(after)):
+        was, now = before.get(name), after.get(name)
+        if was == now:
+            continue
+        if was is None:
+            moved.append(f"{name} appeared during the run")
+        elif now is None:
+            moved.append(f"{name} was removed during the run")
+        else:
+            moved.append(f"{name} was rewritten")
+    return moved
+
+
 _ENDING_RECORDS = frozenset({"run.close", "run.error"})
 
 #: ``run.contained`` says the run was stopped — by its timeout, or by an
@@ -695,6 +726,7 @@ def verify(
     controls: dict[str, dict] = {}
     incomplete_reasons: list[str] = []
     governed_by = ""
+    governing: dict[str, dict] = {}
     for record in records:
         if record.type in {"sandbox.attested", "egress.attested"}:
             found = record.data.get("controls")
@@ -702,23 +734,10 @@ def verify(
                 found = (record.data.get("constraints") or {}).get("controls")
             if isinstance(found, dict):
                 controls = attestation.merge(controls, found)
-        elif record.type == "config.attested":
+        elif record.type in _GOVERNING_RECORDS:
             digests = record.data.get("digests")
             if isinstance(digests, dict):
-                governed_by = digests.get("combined") or ""
-                unreadable = sorted(
-                    name
-                    for name, value in (digests.get("files") or {}).items()
-                    if isinstance(value, str) and not value.startswith("sha256:")
-                )
-                if unreadable:
-                    # A rule file that could not be read is a rule we cannot
-                    # state. Incomplete rather than failed: the chain is sound
-                    # and one of its claims is missing.
-                    incomplete_reasons.append(
-                        "the bundle cannot state what governed the run; "
-                        "unreadable: " + ", ".join(unreadable)
-                    )
+                governing[record.type] = digests
         elif record.type == "egress.guard_stopped":
             # The guard's fate is known only at the end, after the topology
             # was attested. Folded in as a control so it reaches the same
@@ -735,6 +754,48 @@ def verify(
                 },
             )
 
+
+    # What governed the run, and whether it held still. The policy directory
+    # sits inside the writable workspace, so an agent can rewrite the rules it
+    # is being judged by; comparing the two readings is what makes that visible
+    # rather than leaving the opening digest to speak for the whole run.
+    opened = governing.get("config.attested")
+    closed = governing.get("config.reattested")
+    if isinstance(opened, dict):
+        governed_by = opened.get("combined") or ""
+    elif isinstance(closed, dict):
+        governed_by = closed.get("combined") or ""
+
+    unreadable = sorted(
+        {
+            name
+            for reading in governing.values()
+            for name, value in (reading.get("files") or {}).items()
+            if isinstance(value, str) and not value.startswith("sha256:")
+        }
+    )
+    if unreadable:
+        # A rule file that could not be read is a rule we cannot state.
+        # Incomplete rather than failed: the chain is sound and one of its
+        # claims is missing.
+        incomplete_reasons.append(
+            "the bundle cannot state what governed the run; "
+            "unreadable: " + ", ".join(unreadable)
+        )
+
+    if isinstance(opened, dict) and isinstance(closed, dict):
+        moved = _rules_that_moved(opened, closed)
+        if moved:
+            # A problem rather than an incompleteness. Nothing here is missing:
+            # the bundle makes two statements about what the run was allowed to
+            # do, and they cannot both be true, which is the same reasoning that
+            # makes a run.close tally that disagrees with the chain a problem.
+            problems.append(
+                f"{CHAIN_FILE}: the rules changed while the run was under way "
+                f"({', '.join(moved)}); the bundle states what governed the "
+                f"start and what governed the end and they differ, so it cannot "
+                f"say which rules any decision in it was taken under"
+            )
 
     write_errors = 0
     for note in suppressions:

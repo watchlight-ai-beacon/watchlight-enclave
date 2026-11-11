@@ -32,7 +32,38 @@ would mean breaking that promise immediately.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`verify` now reports when a run rewrote the rules it was being judged by.**
+  ⚠️ **This changes the verdict on affected bundles**, and is the second
+  `verify` strictness change in a row — see the note under 0.3.0.
+
+  `config.attested` recorded the digests of `enclave.yaml` and the policy
+  bundle once, when the chain opened. But `/policy` is bound read-only and is
+  the *same inodes* as `/work/policies`, which is writable because an agent
+  that cannot write code cannot do the job. Nothing masks it. A run could
+  rewrite the rules governing it and the bundle went on reporting the digests
+  it took at the start, so the mechanism built to make rule-tampering visible
+  could not see tampering inside its own run.
+
+  The files are read again at the end, as a new `config.reattested` record.
+  Two readings that disagree are a problem rather than an incompleteness:
+  nothing is missing, and the bundle is making two statements about what the
+  run was allowed to do that cannot both be true. The report names each file
+  and whether it was rewritten, added or removed.
+
+  `governed_by` remains the opening digest. It is what a gate pins to assert a
+  run was governed by rules it recognises, and the closing reading would let a
+  run that rewrote its rules mid-flight satisfy a pin it never ran under.
+
+  Older verifiers are unaffected rather than misled: `config.reattested` is a
+  type they skip, so they keep reporting the opening digest. They do not gain
+  the check.
+
+  The limit, stated because the format's claims should be checkable: two
+  readings compare two points, not the interval between them. A run that edits
+  a rule file, acts under it and restores the original leaves two digests that
+  agree.
 
 ## [0.3.0] — 2026-11-10
 
