@@ -32,6 +32,26 @@ would mean breaking that promise immediately.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.1] — 2026-11-12
+
+**An agent could rewrite the rules it was being judged by. It no longer can,
+and `verify` now reports it if the rules move anyway.** Of the three contracts
+this project versions separately, this release moves one: how strictly
+`verify` reads a bundle. The CLI surface and `enclave.yaml` are unchanged, and
+the bundle format is still `wl-enclave-evidence/1`.
+
+Upgrade the verifier before the runtime, or together with it. A 0.3.1 run
+attests a control that 0.3.0's verifier does not know, and an unrecognised
+control name is reported rather than guessed at — so a 0.3.0 `verify` reading a
+0.3.1 bundle returns `incomplete` and exits 1. It is not misreading the
+bundle; it is declining to judge a claim it has no vocabulary for. Both halves
+of a CI gate need to move together.
+
+This is the second `verify` strictness change in a row. If you gate CI on
+`wl-enclave verify`, read the note under 0.3.0 as well.
+
 ### Fixed
 
 - **An agent can no longer change the rules it is being judged by.** The policy
@@ -55,6 +75,12 @@ would mean breaking that promise immediately.
   bundle that *is* the workspace root is not sealed, because that would leave
   the agent unable to write anything.
 
+  Older verifiers do not skip this one. `policy_read_only_in_sandbox` is a
+  control name 0.3.0 has never heard of, and unrecognised names are reported
+  rather than bucketed, so a 0.3.0 `verify` returns `incomplete` on a bundle a
+  0.3.1 `verify` calls `ok`. This is the upgrade-order note at the top of the
+  release, stated here too because it is this change that causes it.
+
 - **`verify` now reports when a run rewrote the rules it was being judged by.**
   ⚠️ **This changes the verdict on affected bundles**, and is the second
   `verify` strictness change in a row — see the note under 0.3.0.
@@ -77,9 +103,9 @@ would mean breaking that promise immediately.
   run was governed by rules it recognises, and the closing reading would let a
   run that rewrote its rules mid-flight satisfy a pin it never ran under.
 
-  Older verifiers are unaffected rather than misled: `config.reattested` is a
-  type they skip, so they keep reporting the opening digest. They do not gain
-  the check.
+  This record does not mislead an older verifier: `config.reattested` is a type
+  they skip, so they keep reporting the opening digest and simply do not gain
+  the check. The new control name above is the part that does affect them.
 
   The limit, stated because the format's claims should be checkable: two
   readings compare two points, not the interval between them. A run that edits
@@ -422,8 +448,14 @@ Each is stated in the bundle or the docs rather than left to be discovered.
   topology — so the two streams are not equally strong.
 - **The workspace is writable**, so a run can edit the rules the next run is
   held to. Made visible with digests rather than prevented. [#13]
+  *(Narrowed in 0.3.1: the policy bundle and `enclave.yaml` are now sealed
+  read-only wherever the workspace exposes them, so the agent cannot be the
+  one that edits them. The rest of the workspace is still writable, and the
+  host still can.)*
 
-[Unreleased]: https://github.com/watchlight-ai-beacon/watchlight-enclave/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/watchlight-ai-beacon/watchlight-enclave/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/watchlight-ai-beacon/watchlight-enclave/releases/tag/v0.3.1
+[0.3.0]: https://github.com/watchlight-ai-beacon/watchlight-enclave/releases/tag/v0.3.0
 [0.2.1]: https://github.com/watchlight-ai-beacon/watchlight-enclave/releases/tag/v0.2.1
 [0.2.0]: https://github.com/watchlight-ai-beacon/watchlight-enclave/releases/tag/v0.2.0
 [0.1.0]: https://github.com/watchlight-ai-beacon/watchlight-enclave/releases/tag/v0.1.0
