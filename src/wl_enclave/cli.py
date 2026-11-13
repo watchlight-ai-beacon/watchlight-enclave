@@ -402,6 +402,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             mounts=[
                 Mount.bind(cfg.root, "/work", read_only=False),
                 *_mask_for_runs(cfg.root, cfg.root / runs.RUNS_DIR),
+                *_seal_policy_in_workspace(cfg.root, cfg.policy),
                 Mount.bind(cfg.policy, "/policy", read_only=True),
                 Mount.bind(run.evidence_dir, AUDIT_DIR_IN_SANDBOX, read_only=False),
             ],
@@ -826,6 +827,38 @@ def _cmd_kill(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------- verify ---
+def _seal_policy_in_workspace(root: Path, policy: Path) -> list[Mount]:
+    """Make the policy files unwritable where the workspace exposes them.
+
+    ``/policy`` was already bound read-only, and that was never the whole
+    story: the policy directory lives inside the project root, which is bound
+    writable at ``/work`` so the agent can write code. Both paths reach the
+    same inodes, so the read-only bind covered a path while the files behind it
+    stayed writable through the other one. An agent could rewrite the rules it
+    was being judged by.
+
+    A second read-only bind at the workspace-relative location closes it. Reads
+    still work — the SDK inside the sandbox loads these files to make decisions,
+    so hiding them would stop governance working at all — while creating,
+    editing and deleting are refused by the kernel rather than detected
+    afterwards.
+
+    Empty when the policy bundle sits outside the workspace, because then
+    nothing exposes it writably and there is nothing to seal.
+    """
+    try:
+        relative = policy.resolve().relative_to(root.resolve())
+    except ValueError:
+        return []
+    if relative == Path("."):
+        # The policy bundle *is* the workspace. Sealing it would make the whole
+        # workspace read-only and leave the agent unable to work, so the
+        # writable mount stands and the two readings in the chain are what
+        # report a change.
+        return []
+    return [Mount.bind(policy, f"/work/{relative.as_posix()}", read_only=True)]
+
+
 def _mask_for_runs(root: Path, runs_root: Path) -> list[Mount]:
     """The mask that keeps a run from seeing its own evidence, if one is needed.
 

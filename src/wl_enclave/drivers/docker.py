@@ -60,6 +60,11 @@ class DockerDriver:
         #: An unmasked canary per sandbox, read to prove the sandbox is
         #: observable before any conclusion is drawn from a failed read.
         self._witness: dict[str, Optional[tuple[str, Path]]] = {}
+        #: Paths bound read-only *inside* a writable mount. A read-only bind on
+        #: its own says little, because nothing else reaches those files; one
+        #: nested in a writable mount is a claim that a path the sandbox could
+        #: otherwise write has been made unwritable, and that is worth probing.
+        self._sealed: dict[str, list[str]] = {}
         #: The egress intent each sandbox was provisioned with, so attest() can
         #: check the sandbox against what was asked for rather than against
         #: whatever it finds attached.
@@ -226,6 +231,7 @@ class DockerDriver:
         self._masks[container_id] = declared_masks
         self._canaries[container_id] = self._plant_canaries(spec, declared_masks)
         self._witness[container_id] = self._plant_witness(spec)
+        self._sealed[container_id] = self._sealed_paths(spec)
         self._egress[container_id] = spec.egress
         return Sandbox(id=container_id, name=spec.name, driver=self.name)
 
@@ -248,6 +254,73 @@ class DockerDriver:
             f"{' '.join(_HOLD_COMMAND)} did not stay up"
             + (f" ({said[-1]})" if said else "")
             + f". The agent image must provide {_HOLD_COMMAND[0]!r}."
+        )
+
+    def _sealed_paths(self, spec: SandboxSpec) -> list[str]:
+        """Read-only binds that sit inside a writable one."""
+        writable = [
+            posixpath.normpath(m.target)
+            for m in spec.mounts
+            if not m.masked and not m.read_only
+        ]
+        sealed = []
+        for mount in spec.mounts:
+            if mount.masked or not mount.read_only:
+                continue
+            target = posixpath.normpath(mount.target)
+            if any(target.startswith(w + "/") for w in writable):
+                sealed.append(target)
+        return sealed
+
+    def _policy_control(self, sandbox: Sandbox) -> dict:
+        """Whether a sealed path is readable and refuses a write, from inside.
+
+        Both halves are checked, and the order matters. A path that cannot be
+        read is not a sealed path, it is an unobservable one, and a run whose
+        SDK cannot load its policy files is not governed at all — reporting
+        that as a control in force would be the strongest possible claim drawn
+        from the weakest possible evidence.
+
+        Only then is the write attempted. Exit codes rather than truthiness:
+        126 and 127 mean the probe itself never ran, which says nothing about
+        the path, and treating that as a refusal is how a sandbox with no
+        ``touch`` would attest a seal it never had.
+        """
+        sealed = self._sealed.get(sandbox.id) or []
+        if not sealed:
+            return attestation.control(
+                None, attestation.RUNTIME_CONFIG,
+                "no path inside the workspace was sealed for this run",
+            )
+        for path in sealed:
+            readable = self._run(
+                "exec", sandbox.id, "ls", path, check=False, timeout=30
+            )
+            if readable.returncode != 0:
+                return attestation.control(
+                    None, attestation.READBACK,
+                    f"{path} could not be read from inside the sandbox "
+                    f"(exit {readable.returncode}); nothing was observed",
+                )
+            probe = posixpath.join(path, ".wl-enclave-write-probe")
+            wrote = self._run(
+                "exec", sandbox.id, "touch", probe, check=False, timeout=30
+            )
+            if wrote.returncode in (126, 127):
+                return attestation.control(
+                    None, attestation.READBACK,
+                    f"the write probe could not run in this image "
+                    f"(exit {wrote.returncode})",
+                )
+            if wrote.returncode == 0:
+                self._run("exec", sandbox.id, "rm", "-f", probe, check=False, timeout=30)
+                return attestation.control(
+                    False, attestation.READBACK,
+                    f"{path} accepted a write from inside the sandbox",
+                )
+        return attestation.control(
+            True, attestation.READBACK,
+            "readable, and a write was refused: " + ", ".join(sealed),
         )
 
     def _plant_canaries(
@@ -419,6 +492,7 @@ class DockerDriver:
             # claim and is not made here.
             attestation.RUNS_AS_NON_ROOT: self._user_control(sandbox, inspected),
             attestation.EVIDENCE_MASKED: self._mask_control(sandbox, declared, missing),
+            attestation.POLICY_READ_ONLY: self._policy_control(sandbox),
             **self._network_control(inspected, intent),
         }
 
@@ -731,6 +805,7 @@ class DockerDriver:
         # Dropped after the container, so a failed rm still leaves the state
         # that explains what the sandbox was.
         self._command.pop(sandbox.id, None)
+        self._sealed.pop(sandbox.id, None)
         self._agent_output.pop(sandbox.id, None)
         agent = self._agent.pop(sandbox.id, None)
         if agent is not None and agent.poll() is None:
