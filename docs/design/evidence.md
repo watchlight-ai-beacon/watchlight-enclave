@@ -116,7 +116,7 @@ wl-enclave: OK — 11 records, chain intact, signed by the expected key
 | `OK` | 0 | chain verifies, every control held, nothing known to be missing |
 | `INCOMPLETE` | 1 | everything here is true, and some of what happened isn't here |
 | `UNCONTAINED` | 1 | chain verifies, and it says isolation didn't hold |
-| `FAILED` | 1 | chain doesn't verify — edited, reordered, or truncated |
+| `FAILED` | 1 | the bundle can't be taken at face value — the chain doesn't verify, or it contradicts itself |
 
 Only `OK` exits 0, so CI can just check the exit code.
 
@@ -177,6 +177,37 @@ records are then a lower bound rather than a complete account.
 *problem*, not an incompleteness — the bundle isn't reporting a gap it knows
 about, it's making two statements that can't both be true.
 
+**The rule files get read twice.** `/policy` is bound read-only, and it's the
+same inodes as `/work/policies`, which is writable because an agent that can't
+write code can't do the job. Nothing masks it. So a run can rewrite the rules
+it's being judged by, and a digest taken only at the start would go on
+describing rules that stopped applying halfway through — the mechanism built to
+make rule-tampering visible, blind to tampering inside its own run.
+
+So `config.attested` is what governed the start and `config.reattested` is what
+governed the end. Two readings that disagree are a *problem*, for the same
+reason a tally mismatch is: nothing's missing, and the bundle is making two
+statements about what the run was allowed to do that can't both be true. The
+report names the files, and whether each was rewritten, added or removed —
+being handed a new rule and rewriting an existing one are different events, and
+a combined digest can't tell them apart.
+
+`governed_by` stays the *opening* digest. It's what a gate pins to assert a run
+was governed by rules it recognises, and pointing it at the closing reading
+would let a run that rewrote its rules mid-flight satisfy a pin it never
+actually ran under.
+
+The reason this is a separate record type rather than a second
+`config.attested` is older verifiers. They skip a type they don't know, so they
+keep reporting the opening digest. Reuse the existing type and they'd read the
+*last* one instead — handing back the digest of the rules the agent rewrote, as
+the authoritative answer to what governed the run.
+
+The limit worth stating: two readings compare two points, not the interval
+between them. An agent that edits a rule file, acts under it and puts the
+original back leaves two digests that agree. Catching that needs a watch on the
+files, which is a different mechanism.
+
 **Unknown control names get reported.** If a writer emits a control name this
 verifier doesn't recognise, we say so rather than guessing which category it
 belongs in. An unrecognised name means the writer and verifier have drifted
@@ -189,7 +220,8 @@ Written by the host:
 | Type | Contents |
 |---|---|
 | `run.open` | run id, agent, purpose, runtime, command, version |
-| `config.attested` | digests of `enclave.yaml` and every policy file in play |
+| `config.attested` | digests of `enclave.yaml` and every policy file in play, at the start |
+| `config.reattested` | the same files read again at the end, to show whether they moved |
 | `sandbox.attested` | constraints read back out of Docker, plus named controls |
 | `egress.guard_started` | which guard, which endpoint, which network |
 | `egress.attested` | was the guard the only route, and what do the records cover |
