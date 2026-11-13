@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "watchlight-enclave"
-version = "0.3.0"
+version = "0.3.1"
 description = "Watchlight AI Enclave — a governed, isolated runtime for autonomous AI agents."
 readme = "README-pypi.md"
 requires-python = ">=3.10"
