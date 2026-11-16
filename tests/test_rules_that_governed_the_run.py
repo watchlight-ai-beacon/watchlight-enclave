@@ -6,12 +6,16 @@ policy bundle once, when the chain opened. The docstring on
 a run that widens its *successor's* allowlist leaves the widening in its own
 evidence — but there is a narrower one it did not cover.
 
-``/policy`` is bound read-only, and it is the same inodes as
-``/work/policies``, which is writable because an agent that cannot write code
-cannot do the job. Nothing masks it. So a run can rewrite the rules it is
-itself being held to, and a digest taken only at the start would go on
+When this was written ``/policy`` was bound read-only but was the same inodes
+as ``/work/policies``, which is writable because an agent that cannot write
+code cannot do the job, and nothing masked it. So a run could rewrite the rules
+it was itself being held to, and a digest taken only at the start would go on
 describing rules that stopped applying halfway through: the mechanism built to
 make rule-tampering visible could not see tampering inside its own run.
+
+The policy bundle is sealed read-only in the sandbox now, which closes that
+path. ``enclave.yaml`` is not sealed, and the seal does not bind the host, so
+the two readings are still what report a change.
 
 The files are now read again at the end. Two readings that disagree are a
 ``problem``, not an incompleteness — nothing is missing, and the bundle is
@@ -224,10 +228,11 @@ def test_governing_digests_actually_notices_an_edited_policy(tmp_path):
 def test_the_policy_directory_is_inside_the_writable_workspace(tmp_path):
     """The premise the whole issue rests on, asserted rather than assumed.
 
-    /work is bound writable and /policy read-only, but they are the same
-    inodes: the read-only bind covers the path, not the files behind it. If a
-    future change moves the policy bundle out of the workspace, this test
-    should fail and the fix above can be reconsidered.
+    Where the policy bundle lives decides both halves of the design: a bundle
+    inside the workspace is exposed writably by /work and has to be sealed
+    there, and a bundle outside it is not sealed at all. If a future change
+    moves the policy bundle out of the workspace, this test should fail and
+    both decisions can be reconsidered.
     """
     (tmp_path / "policies").mkdir()
     (tmp_path / "policies" / "a.policy.json").write_text(

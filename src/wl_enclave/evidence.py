@@ -755,10 +755,11 @@ def verify(
             )
 
 
-    # What governed the run, and whether it held still. The policy directory
-    # sits inside the writable workspace, so an agent can rewrite the rules it
-    # is being judged by; comparing the two readings is what makes that visible
-    # rather than leaving the opening digest to speak for the whole run.
+    # What governed the run, and whether it held still. The policy bundle is
+    # sealed read-only in the sandbox, but enclave.yaml is not, and the seal
+    # does not bind the host at all; comparing the two readings is what makes a
+    # mid-run change visible rather than leaving the opening digest to speak
+    # for the whole run.
     opened = governing.get("config.attested")
     closed = governing.get("config.reattested")
     if isinstance(opened, dict):

@@ -51,10 +51,13 @@ def _fail(msg: str, hint: Optional[str] = None) -> int:
 def _attest_governing_files_again(chain: evidence.ChainWriter, cfg) -> None:
     """Re-read the rule files at the end of a run and record what they are now.
 
-    ``/policy`` is bound read-only, but it is the same inodes as
-    ``/work/policies``, which is writable because an agent that cannot write
-    code cannot do the job. Nothing masks it, so a run can rewrite the rules it
-    is itself being held to, and a digest taken once at the start would go on
+    The policy bundle is bound read-only wherever the workspace exposes it, but
+    that seal does not cover everything these digests do. ``enclave.yaml`` stays
+    writable, because it sits in the workspace an agent has to write to; the
+    seal constrains the sandbox and not the host, so an operator can edit the
+    files while the run is under way; and a policy bundle that is itself the
+    workspace root is left writable rather than leaving the agent nowhere to
+    work. In each of those cases a digest taken once at the start would go on
     describing rules that stopped applying halfway through.
 
     Reading them again is what lets ``verify`` tell the two cases apart. It
@@ -306,15 +309,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "wl_enclave_version": __version__,
         },
     )
-    # What governed this run, by content rather than by path. The workspace is
-    # writable, so a run can edit the rules its successor will be held to;
-    # recording the bytes means the next bundle cannot silently claim the same
-    # rules as this one.
+    # What governed this run, by content rather than by path. enclave.yaml sits
+    # in the writable workspace, so a run can still edit the rules its
+    # successor will be held to; recording the bytes means the next bundle
+    # cannot silently claim the same rules as this one.
     #
-    # Read again at the end, as config.reattested, because the policy directory
-    # lives inside the writable workspace: the read-only bind at /policy covers
-    # the path, not the files behind it. This record describes the rules the
-    # run started under.
+    # Read again at the end, as config.reattested, because the policy seal does
+    # not reach everything these digests cover: enclave.yaml is not sealed, the
+    # seal binds the sandbox rather than the host, and a policy bundle that is
+    # the workspace root is left writable so the agent can work. This record
+    # describes the rules the run started under.
     chain.append(
         "config.attested",
         {
