@@ -119,10 +119,10 @@ class Config:
         """Hashes of the files that decided what this run was allowed to do.
 
         The workspace is mounted writable, because an agent that cannot write
-        code cannot do the job. That means ``enclave.yaml`` and the policy
-        bundle are both reachable from inside the sandbox, so a run can change
-        what the *next* run is permitted to do. Making them read-only is not
-        available without taking away the workspace.
+        code cannot do the job. The policy bundle is bound read-only wherever
+        the workspace exposes it, so the sandbox cannot rewrite that half, but
+        ``enclave.yaml`` sits in the writable tree with nothing sealing it, and
+        a run can still change what the *next* run is permitted to do.
 
         What is available is making the change visible. Each bundle states the
         exact bytes that governed it, so two runs under silently different
