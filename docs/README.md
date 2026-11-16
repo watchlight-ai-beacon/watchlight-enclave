@@ -358,6 +358,8 @@ only one match.
 
 ## Next
 
+- [`ci.md`](ci.md) — the same run under CI: the GitHub Action, signing from a
+  repository secret, and gating a merge on the bundle verifying `ok`.
 - [`docs/design/`](design/README.md) — the design notes. What a bundle
   actually proves, why your bundle says `incomplete`, what stops the agent
   editing its own evidence, and what to know before writing a driver.
