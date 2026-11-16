@@ -52,6 +52,28 @@ public key id, never the file, so they can pin the signer:
 > [`CHANGELOG.md`](CHANGELOG.md) is explicit about which of the three a release
 > moved. 1.0 is gated on the manifest reaching its final shape.
 
+## In CI
+
+The quickstart above is how you learn the tool. CI is where it earns its keep:
+the agent runs with nobody watching, the runner already has Docker, and
+`verify` exits 0 only for a bundle whose verdict is `ok` — which is the bit a
+merge gate needs. This repository doubles as a GitHub Action that runs the
+agent, verifies the bundle offline, uploads it as a workflow artifact, and
+fails the job unless both the agent and the evidence came back clean:
+
+```yaml
+- uses: watchlight-ai-beacon/watchlight-enclave@main
+  with:
+    purpose: "CI: ${{ github.event.pull_request.title || github.ref_name }}"
+    sign-key: ${{ secrets.WL_ENCLAVE_SIGNING_KEY }}
+```
+
+The artifact is the part that outlives the job. A reviewer downloads it and
+runs `wl-enclave verify <bundle> --signer <your key id>` on their own machine,
+offline — no runner access, no repository access, no taking your word for it.
+[`docs/ci.md`](docs/ci.md) has the full page: signing from a secret, every
+input, and what the green check does and doesn't mean.
+
 ## What did it reach?
 
 The question a security review opens with. The answer comes out of verified

@@ -1,0 +1,158 @@
+# The GitHub Action wrapper around `wl-enclave run` + `wl-enclave verify`.
+#
+# The gate is verify's exit code: only a bundle whose verdict is `ok` exits 0,
+# so a job using this action fails on a broken chain, an uncontained run and
+# an incomplete bundle alike — the same contract `verify` gives any CI.
+#
+# The bundle path is parsed from run's own output ("wl-enclave: bundle <path>")
+# because the CLI has no structured output yet; if that line ever changes, the
+# `run` step below is the one place that reads it.
+
+name: Watchlight AI Enclave
+description: >-
+  Run an agent in a governed sandbox and gate the job on its evidence bundle.
+  The job passes only when the bundle verifies ok.
+branding:
+  icon: shield
+  color: yellow
+
+inputs:
+  purpose:
+    description: Why this run exists. Recorded in the evidence bundle.
+    required: true
+  working-directory:
+    description: The directory holding enclave.yaml.
+    required: false
+    default: "."
+  version:
+    description: >-
+      watchlight-enclave version to install. Empty installs the latest release.
+    required: false
+    default: ""
+  sign-key:
+    description: >-
+      Contents of an Ed25519 private key, from a secret, to sign the sealed
+      manifest with. Empty seals unsigned — the chain still verifies, but it
+      proves nothing about who produced it.
+    required: false
+    default: ""
+  signer:
+    description: >-
+      Key id that verify must find on the bundle's signature. Set it when the
+      person reading the artifact should not have to trust this workflow.
+    required: false
+    default: ""
+  require-signature:
+    description: Fail an unsigned bundle, without pinning which key signed it.
+    required: false
+    default: "false"
+  upload-bundle:
+    description: Upload the evidence bundle as a workflow artifact.
+    required: false
+    default: "true"
+  artifact-name:
+    description: Name of the uploaded artifact.
+    required: false
+    default: wl-enclave-evidence
+
+outputs:
+  bundle:
+    description: >-
+      Absolute path to the sealed evidence bundle, or empty if the run failed
+      before it produced one.
+    value: ${{ steps.run.outputs.bundle }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install wl-enclave
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: python3 -m pip install --quiet "watchlight-enclave${VERSION:+==$VERSION}"
+
+    - name: Check the config and the runtime
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: wl-enclave doctor
+
+    - name: Write the signing key, if one was given
+      id: key
+      shell: bash
+      env:
+        SIGN_KEY: ${{ inputs.sign-key }}
+      run: |
+        if [ -n "$SIGN_KEY" ]; then
+          keyfile="$RUNNER_TEMP/wl-enclave-signing.key"
+          (umask 077 && printf '%s\n' "$SIGN_KEY" > "$keyfile")
+          echo "path=$keyfile" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Run the agent in the sandbox
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PURPOSE: ${{ inputs.purpose }}
+        KEYFILE: ${{ steps.key.outputs.path }}
+      # The step itself never fails: the exit code is carried to the gate at
+      # the end, so verify still runs and the bundle still uploads — a failed
+      # run is exactly the run whose evidence someone will want to read.
+      run: |
+        set +e
+        out="$RUNNER_TEMP/wl-enclave-run.out"
+        if [ -n "$KEYFILE" ]; then
+          wl-enclave run --purpose "$PURPOSE" --sign-key "$KEYFILE" | tee "$out"
+        else
+          wl-enclave run --purpose "$PURPOSE" | tee "$out"
+        fi
+        echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+        bundle=$(grep -m1 '^wl-enclave: bundle' "$out" | awk '{print $NF}')
+        echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Verify the evidence, offline
+      id: verify
+      shell: bash
+      env:
+        BUNDLE: ${{ steps.run.outputs.bundle }}
+        SIGNER: ${{ inputs.signer }}
+        REQUIRE: ${{ inputs.require-signature }}
+      run: |
+        set +e
+        if [ -z "$BUNDLE" ]; then
+          echo "no bundle to verify — the run failed before it sealed one"
+          echo "exit=1" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        args=()
+        if [ -n "$SIGNER" ]; then args+=(--signer "$SIGNER"); fi
+        if [ "$REQUIRE" = "true" ]; then args+=(--require-signature); fi
+        wl-enclave verify "$BUNDLE" "${args[@]}"
+        echo "exit=$?" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Upload the bundle as an artifact
+      if: ${{ inputs.upload-bundle == 'true' && steps.run.outputs.bundle != '' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.run.outputs.bundle }}
+        if-no-files-found: warn
+
+    - name: Gate on the run and the evidence
+      shell: bash
+      env:
+        RUN_EXIT: ${{ steps.run.outputs.exit }}
+        VERIFY_EXIT: ${{ steps.verify.outputs.exit }}
+      run: |
+        fail=0
+        if [ "$VERIFY_EXIT" != "0" ]; then
+          echo "::error::the evidence bundle did not verify ok — only ok exits 0, and this gate inherits that contract"
+          fail=1
+        fi
+        if [ "$RUN_EXIT" != "0" ]; then
+          echo "::error::the agent exited non-zero, or timed out, inside the sandbox"
+          fail=1
+        fi
+        exit "$fail"
