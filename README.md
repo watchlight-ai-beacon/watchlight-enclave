@@ -348,6 +348,14 @@ work.
 Want the engine source, an air-gapped build, or to govern a fleet in
 production? [email sales@watchlight.ai](mailto:sales@watchlight.ai?subject=Watchlight%20AI%20Enclave).
 
+## Learn more
+
+- [Watchlight AI Enclave](https://www.watchlight.ai/enclave): what it is for, and how it fits with Developer Edition and Watchlight AI Beacon
+- [How do you govern Claude Code and other coding agents in an enterprise?](https://www.watchlight.ai/answers/govern-coding-agents)
+- [How do you audit what AI agents did?](https://www.watchlight.ai/answers/audit-ai-agent-actions)
+- [How do I prevent prompt injection from making an AI agent take a harmful action?](https://www.watchlight.ai/answers/prevent-prompt-injection-harmful-action)
+- [What is Agent Runtime Governance?](https://www.watchlight.ai/answers/what-is-agent-runtime-governance)
+
 ## Security
 
 Found a way to make a bundle understate what happened? That is the most

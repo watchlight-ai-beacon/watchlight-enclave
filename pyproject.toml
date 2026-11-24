@@ -41,7 +41,7 @@ dependencies = ["PyYAML>=6.0", "cryptography>=42.0"]
 # the source, which for a project whose claim is "read the verifier yourself"
 # is the one link that has to be there.
 [project.urls]
-Homepage = "https://github.com/watchlight-ai-beacon/watchlight-enclave"
+Homepage = "https://www.watchlight.ai/enclave"
 Source = "https://github.com/watchlight-ai-beacon/watchlight-enclave"
 Documentation = "https://docs.watchlight.ai/enclave"
 Changelog = "https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/CHANGELOG.md"
