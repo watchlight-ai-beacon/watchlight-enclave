@@ -81,6 +81,14 @@ driver for a new sandbox.
 - [Changelog](https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/CHANGELOG.md) — including the three contracts this project versions separately
 - [Security policy](https://github.com/watchlight-ai-beacon/watchlight-enclave/blob/main/SECURITY.md)
 
+## Learn more
+
+- [Watchlight AI Enclave](https://www.watchlight.ai/enclave): what it is for, and how it fits with Developer Edition and Watchlight AI Beacon
+- [How do you govern Claude Code and other coding agents in an enterprise?](https://www.watchlight.ai/answers/govern-coding-agents)
+- [How do you audit what AI agents did?](https://www.watchlight.ai/answers/audit-ai-agent-actions)
+- [How do I prevent prompt injection from making an AI agent take a harmful action?](https://www.watchlight.ai/answers/prevent-prompt-injection-harmful-action)
+- [What is Agent Runtime Governance?](https://www.watchlight.ai/answers/what-is-agent-runtime-governance)
+
 ## Status
 
 Early development, pre-1.0. The CLI, the `enclave.yaml` schema and how strictly
